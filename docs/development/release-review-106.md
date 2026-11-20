@@ -52,6 +52,17 @@ Evidence directory: Lens2Mesh-validation-evidence/release-106.
   tests passed after calibration and output-layout review, including an added
   device-change regression. Full Windows/Linux suite and installed candidate
   checks are required before acceptance; their results will be recorded below.
+- Local complete regression run: 1023 passed, 14 skipped in 330.90 seconds;
+  subsequent final-recovery selection/lifecycle regressions: 10 passed. Skips
+  explicitly require real OpenGL, external processed data, or filesystem link
+  privileges. A test-only DXF oracle was installed in an isolated evidence folder;
+  the personal installation and its running reconstruction were not changed.
+- Personal-baseline delta: 3,021,864 bytes before the final QA-log correction;
+  applied to a disposable copy, exact installed source identity and offline
+  Help/About/licence in both themes passed (169 application files). Native
+  cancelled/resumed alignment registered all 16 cameras, centre RMS 0.02497 m,
+  reprojection RMS 0.22216 px. Installed console validation is UTF-8 explicitly;
+  this avoids a QA-only cp1252 console error for Persian photo names.
 - Native COLMAP 4.2.1 CPU test: 16 synthetic photos with spaces and Persian names;
   cancelled after a valid 12-camera snapshot, resumed to all 16 cameras; camera
   centre RMS after independent similarity fit 0.02550 m, reprojection RMS 0.22589 px.
