@@ -95,7 +95,9 @@ def choose_input(workdir):
     """Ignore half-written snapshots; prefer the largest valid model."""
     from .engine import validate_model
     root=Path(workdir)
-    candidates=list((root/'checkpoints').glob('**/images.bin'))
+    # Coarse-to-fine uses a different feature database. Its camera snapshots
+    # must never seed final-resolution tracks, even if they contain more cameras.
+    candidates=list((root/'checkpoints'/'sparse').glob('**/images.bin'))
     if (root/'sparse/0/images.bin').exists():candidates.append(root/'sparse/0/images.bin')
     ranked=[]
     for image in candidates:

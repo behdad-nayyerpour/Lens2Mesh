@@ -100,13 +100,24 @@ def test_corrupt_newest_snapshot_is_skipped(pending,monkeypatch):
     from photomesh import engine
     dataset,work,record=pending
     for number,count in ((1,10),(2,20)):
-        folder=work/'checkpoints'/str(number);folder.mkdir(parents=True)
+        folder=work/'checkpoints'/'sparse'/str(number);folder.mkdir(parents=True)
         (folder/'images.bin').write_bytes(struct.pack('<Q',count))
     def validate(path):
         if Path(path).name=='2':raise EOFError('interrupted write')
         return SimpleNamespace()
     monkeypatch.setattr(engine,'validate_model',validate)
     assert resume.choose_input(work).name=='1'
+
+
+def test_coarse_camera_snapshots_cannot_seed_final_feature_tracks(pending,monkeypatch):
+    import struct
+    from photomesh import engine
+    dataset,work,record=pending
+    for stage,count in (('sparse_coarse',100),('sparse',10)):
+        folder=work/'checkpoints'/stage/'snapshot';folder.mkdir(parents=True)
+        (folder/'images.bin').write_bytes(struct.pack('<Q',count))
+    monkeypatch.setattr(engine,'validate_model',lambda path:SimpleNamespace())
+    assert resume.choose_input(work).parent.name=='sparse'
 
 
 def test_success_hook_runs_only_after_successful_native_command(qtbot):

@@ -35,6 +35,8 @@ follow-up areas. CPU/GPU and legacy/modern engine paths deliberately stay separa
 - Native integration exposed COLMAP's different output layout with input_path;
   resumed models now explicitly target sparse/0 before export.
 - Re-probe matching device flags on resume; retain saved feature/pair selection.
+- Restrict resume snapshots to the final sparse model: coarse snapshots belong
+  to another feature database and cannot seed final-resolution tracks.
 - Restore raw GPS backup before repeated postprocessing to avoid double transform.
 - Pan using the screen basis at both poles; allow complete elevation/azimuth turns
   while retaining the existing picking and axis-indicator coordinate contract.
