@@ -27,8 +27,8 @@ socket.socket.connect = socket.create_connection = socket.getaddrinfo = blocked
 from photomesh import documentation, survey_capacity  # noqa: E402
 for module in (documentation, survey_capacity):
     assert Path(module.__file__).resolve().is_relative_to(app_root)
-manual = documentation.RESOURCES/'manual/Lens2Mesh_1.0.5_Complete_User_Manual.pdf'
-assert hashlib.sha256(manual.read_bytes()).hexdigest() == '83bcd31c0ddea7277227045311f5f74117164d7bf96b8dac933296cae02f9faf'
+manual = documentation.RESOURCES/documentation.MANUAL
+assert hashlib.sha256(manual.read_bytes()).hexdigest() == documentation.MANUAL_SHA256
 assert (documentation.RESOURCES/'third-party/index.html').is_file()
 
 import numpy as np  # noqa: E402

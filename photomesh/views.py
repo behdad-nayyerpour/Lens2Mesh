@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QEvent, QPointF
-from PySide6.QtGui import QPixmap, QPainter, QColor, QWheelEvent, QPen
+from PySide6.QtGui import QPixmap, QPainter, QColor, QWheelEvent, QPen, QVector3D
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QGraphicsView,
                                QGraphicsScene)
 
@@ -45,6 +45,30 @@ if HAVE_GL:
         owner's overlay (labels, marker dots, legend) is painted with QPainter
         with the depth test off, so geometry can never cover it."""
         overlay_cb = None
+        anglesChanged = Signal()
+
+        def orbit(self, azim, elev):
+            # Retain the Euler/view-matrix contract used by picks and the gizmo,
+            # but allow continuous turns through both poles and full revolutions.
+            self.opts['azimuth'] = (self.opts['azimuth'] + azim + 180.) % 360. - 180.
+            self.opts['elevation'] = (self.opts['elevation'] + elev + 180.) % 360. - 180.
+            self.anglesChanged.emit()
+            self.update()
+
+        def pan(self, dx, dy, dz, relative='global'):
+            if relative == 'global':
+                return super().pan(dx, dy, dz, relative=relative)
+            if relative not in ('view', 'view-upright'):
+                raise ValueError('Unknown camera pan frame')
+            # Screen-plane panning remains well-defined at top/bottom and when
+            # upside down. A cross product with world up collapses at the poles.
+            rotation = view_rotation(self.opts['azimuth'], self.opts['elevation'])
+            scale = 2 * self.opts['distance'] * np.tan(np.radians(self.opts['fov']/2)) / max(1, self.width())
+            delta = rotation.T @ np.array([-dx, dy, dz if relative == 'view' else 0.])
+            if relative == 'view-upright':
+                delta[2] += dz
+            self.opts['center'] += QVector3D(*(delta * scale))
+            self.update()
 
         def paintGL(self):
             try:              # GL state that items may leave changed (transparent surfaces, depth bias)
@@ -217,6 +241,7 @@ class ModelView(QWidget):
         if HAVE_GL and not offscreen and not os.environ.get("PHOTOMESH_NO_GL"):
             try:
                 self.gl = OverlayGLView()
+                self.gl.anglesChanged.connect(self._sync_gizmo)
                 self.gl.setMouseTracking(True)
                 self.gl.overlay_cb = self._paint_overlay
                 self.gl.setContextMenuPolicy(Qt.CustomContextMenu)

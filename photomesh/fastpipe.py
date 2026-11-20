@@ -574,6 +574,12 @@ def write_pairs(path, pairs):
     return path
 
 
+def read_pairs(path, names):
+    from .pair_matching import exact_pairs
+    with open(path, encoding='utf-8') as stream:
+        return exact_pairs(stream, names, {name:name for name in names})[0]
+
+
 def covisible_pairs(images_txt, min_shared=15, max_per_image=20):
     """Pairs of image names sharing >= min_shared 3D points in a model.
     Each image keeps at most its max_per_image strongest partners (a pair is
@@ -582,7 +588,7 @@ def covisible_pairs(images_txt, min_shared=15, max_per_image=20):
     with open(images_txt, encoding="utf-8", errors="ignore") as f:
         lines = [l for l in f if not l.startswith("#")]
     for i in range(0, len(lines) - 1, 2):
-        head = lines[i].split()
+        head = lines[i].rstrip('\r\n').split(maxsplit=9)
         if len(head) < 10:
             continue
         iid = int(head[0]); names[iid] = head[9]
@@ -709,6 +715,20 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
     from .colmap import GLOMAP, Try, opt
     kind = choose_mapper(s, n_images, exe)
     inc = incremental_mapper_args(exe, db, img_dir, out, ilist, n_images, coarse)
+    # Keep snapshots outside output models, so a resumed mapper can write into
+    # a fresh sparse folder while retaining the previous saved camera states.
+    checkpoints=os.path.join(os.path.dirname(out),'checkpoints',os.path.basename(out))
+    os.makedirs(checkpoints,exist_ok=True)
+    inc+=opt(exe,'mapper',['Mapper.snapshot_path'],checkpoints)
+    interval=max(10,((n_images+19)//20+9)//10*10)
+    inc+=opt(exe,'mapper',['Mapper.snapshot_frames_freq','Mapper.snapshot_images_freq'],interval)
+    if s.get('_resume_input'):
+        inc+=opt(exe,'mapper',['input_path'],s['_resume_input'])
+        # With input_path COLMAP writes the supplied reconstruction directly
+        # into output_path, rather than creating a numbered model directory.
+        resumed_out=os.path.join(out,'0')
+        os.makedirs(resumed_out,exist_ok=True)
+        inc[inc.index('--output_path')+1]=resumed_out
     label = f"Estimating camera locations{tag}"
 
     def fallback():
@@ -871,7 +891,8 @@ def fast_align_steps(exe, wd, names, infos, s):
         a += matching_arguments(exe, "matches_importer", s)
         if s.get("guided_matching"):
             a += opt(exe, "matches_importer", ["FeatureMatching.guided_matching", "SiftMatching.guided_matching"], "1")
-        return a
+        from .pair_matching import PairImport
+        return PairImport(a, db, ptxt, ilist)
 
     def preselect():
         pairs = select_pairs(names, infos, k_desc=s.get("k_desc", 8), k_gps=s.get("k_gps", 8),
@@ -932,7 +953,7 @@ def fast_align_steps(exe, wd, names, infos, s):
         def plan_fine():
             os.makedirs(ctxt, exist_ok=True)
             if not coarse_state["trusted"]:
-                pre=[tuple(line.split()) for line in open(pairs_txt,encoding="utf-8") if line.strip()]
+                pre=read_pairs(pairs_txt,names)
                 write_pairs(fine_pairs,pre)
                 return [("log","Target-resolution mapping with unknown calibration; coarse camera poses are not inherited.",0),
                         ("Matching points (target resolution)",import_matches(fdb,fine_pairs),15)] + mapper_steps(exe,fdb,img_dir,sparse,s,n,ilist,tag=" (fine)")
@@ -941,7 +962,7 @@ def fast_align_steps(exe, wd, names, infos, s):
                 return [("log", "Coarse model missing - fine stage skipped", 0)]
             cov, registered = covisible_pairs(images_txt, s.get("min_shared", 15), s.get("max_pairs_per_image", 20))
             # unregistered images keep their preselected pairs
-            pre = [tuple(l.split()) for l in open(pairs_txt, encoding="utf-8")]
+            pre = read_pairs(pairs_txt,names)
             extra = {p for p in pre if p[0] not in registered or p[1] not in registered}
             pairs = sorted(cov | extra)
             write_pairs(fine_pairs, pairs)

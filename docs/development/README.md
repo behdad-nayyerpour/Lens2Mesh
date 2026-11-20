@@ -10,7 +10,7 @@ Install a compatible Python and Git first, then use PowerShell:
 
 ```powershell
 git clone https://github.com/behdad-nayyerpour/Lens2Mesh.git
-cd Desktop-PhotoMesh-Studio
+cd Lens2Mesh
 .\setup.bat
 .\run.bat
 ```
@@ -127,4 +127,4 @@ The installed validators in `tools/validate_installed_103.py` and
 `tools/validate_installed_104.py` cover their respective versions.
 
 The [project screenshots](../../README.md#screenshots) show the released Windows
-1.0.4 interface in Dark and Light themes.
+1.0.5 interface in Dark and Light themes.

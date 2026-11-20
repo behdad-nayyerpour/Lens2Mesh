@@ -4,7 +4,16 @@ Changes are listed from newest to oldest. Installation instructions in older
 entries describe the release at that time; current releases use one full Setup
 EXE. See [Updating](UPDATING.md).
 
-### 1.0.5 (test candidate; Setup pending acceptance)
+### 1.0.6 (2026-11-21)
+
+- Preserve full photo names, including spaces and Unicode, in Fast pair matching and text camera/covisibility readers. Stop before camera estimation if matching produces no verified connections.
+- Restore stable photo identities after native matching on success, failure or cancellation; retain a recovery journal if the application is interrupted.
+- Pan in the screen plane in Top/Bottom and inverted views; retain explicit global-coordinate panning.
+- Allow continuous 360-degree camera turns in both orbit directions and synchronize the axis indicator.
+- Resume interrupted final matching/mapping using stored settings and valid incremental camera snapshots; leave the previous published alignment untouched until validation completes.
+- Retain the compact offline base, separate optional NVIDIA runtime and project/settings compatibility; update only the approved recovery/navigation manual sections and necessary version/index references.
+
+### 1.0.5
 
 - Rename current branding to Lens2Mesh; retain project extensions, settings and installer identity for compatibility.
 - Add strict EXIF/XMP decoding, camera models, calibration presets, opt-in GPS accuracy and explicit horizontal/vertical reference controls.
@@ -13,7 +22,7 @@ EXE. See [Updating](UPDATING.md).
 - Improve measured progress, ETA suppression, automatic successful-product display and large-project solver/GPS/DEM capacity.
 - Replace the PLY dependency independently, remove reviewed unused Qt addons and add offline third-party notices and unchanged approved PDF access.
 - Report complete user-script tracebacks, preserve source encoding and validate exact Windows runtime package versions against hashed wheel pins.
-- Test upgrades using incremental BAT packages and byte-exact rollback; full Setup is not yet published.
+- Test upgrades using incremental BAT packages and byte-exact rollback; the compact base Setup and separate optional NVIDIA package were subsequently published.
 - Direct point selection/deletion remains deferred. The approved complete English PDF remains unchanged.
 
 ### 1.0.4 (2026-11-07, corrected installer 2026-11-08)

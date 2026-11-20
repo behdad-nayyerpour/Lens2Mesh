@@ -50,6 +50,15 @@ def test_different_existing_runtime_fails_without_overwrite(installation):
     assert target.read_bytes() == b'other version'
 
 
+def test_106_uses_same_authenticated_optional_runtime(installation):
+    root,payload,spec=installation
+    (root/'app/photomesh/__init__.py').write_text('APP_NAME="Lens2Mesh"\nAPP_VERSION="1.0.6"\n')
+    assert addon.make_manifest(root,payload,'c'*40,spec)['files']
+    (root/'app/photomesh/__init__.py').write_text('APP_NAME="Lens2Mesh"\nAPP_VERSION="9.9.9"\n')
+    with pytest.raises(ValueError,match='existing Lens2Mesh'):
+        addon.make_manifest(root,payload,'c'*40,spec)
+
+
 def test_wrong_app_or_payload_is_rejected(installation):
     root, payload, spec = installation
     (payload / 'app/photomesh/resources/neural-cuda12/one.dll').write_bytes(b'corrupt')

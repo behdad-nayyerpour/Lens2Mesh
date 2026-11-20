@@ -1,6 +1,6 @@
 # Lens2Mesh
 
-**Version 1.0.5.** New Lens2Mesh branding, reference/calibration controls, ground classification, LAS/LAZ, DTM and an interactive cross-section panel.
+**Version 1.0.6.** Fixes alignment with spaces in photo names, panning in Top/Bottom views and full rotation in both viewing directions.
 
 Lens2Mesh is a desktop photogrammetry application for processing aerial and terrestrial
 imagery locally, without a cloud service. It is available at no charge for
@@ -10,7 +10,7 @@ Built with Python and PySide6, it uses COLMAP for photo alignment and dense
 reconstruction, alongside application code for project management, visualization,
 and surveying workflows.
 
-**[Windows release: Lens2Mesh 1.0.5](https://github.com/behdad-nayyerpour/Lens2Mesh/releases/tag/v1.0.5)** ·
+**[Latest Windows release](https://github.com/behdad-nayyerpour/Lens2Mesh/releases/latest)** ·
 [User guide](docs/user-guide.md) · [Installation](docs/installation.md) ·
 [Changelog](CHANGES.md) · [License](LICENSE) ·
 [Report a problem](https://github.com/behdad-nayyerpour/Lens2Mesh/issues/new?template=bug_report.md)
@@ -42,13 +42,13 @@ See [image attribution and license](SCREENSHOT-LICENSE.txt).
 
 ## Install
 
-Download `Lens2Mesh_Setup_1.0.5.exe` and its SHA-256 checksum from
+Download `Lens2Mesh_Setup_1.0.6.exe` and its SHA-256 checksum from
 [Releases](https://github.com/behdad-nayyerpour/Lens2Mesh/releases/latest).
 The offline installer includes Python, required packages, COLMAP and the
 compatible legacy GLOMAP engine. A separate Python or Git installation is not
 needed. Close the application before installing. Setup supports fresh installs
 and upgrades and offers destination selection.
-The optional `Lens2Mesh_NeuralGPU_Addon_1.0.5.exe` enables NVIDIA acceleration for
+The optional `Lens2Mesh_NeuralGPU_Addon_1.0.6.exe` enables NVIDIA acceleration for
 ALIKED/LightGlue; those methods use CPU without it. The base Setup retains standard
 COLMAP GPU processing and all offline models. Install the add-on with Lens2Mesh
 closed, into the same folder. No CUDA Toolkit installation is needed.

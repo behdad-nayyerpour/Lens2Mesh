@@ -1782,10 +1782,24 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         exe = self._need_colmap()
         if not exe:
             return
-        dlg = AlignPhotosDialog(self)
-        if not dlg.exec():
-            return
-        s = dlg.settings()
+        from . import alignment_resume
+        saved=alignment_resume.pending(self.project.data_dir,ch)
+        if saved:
+            answer=QMessageBox.question(self,'Resume alignment',
+                'Unfinished alignment with unchanged photos was found.\n'
+                'Resume saved matching/cameras with its original settings?\n'
+                'Yes: resume. No: start a new alignment. Cancel: return.',
+                QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel,QMessageBox.Yes)
+            if answer==QMessageBox.Cancel:return
+            if answer==QMessageBox.No:saved=None
+        if saved:
+            s=dict(saved[1]['settings'])
+            dlg=None
+        else:
+            dlg = AlignPhotosDialog(self)
+            if not dlg.exec():
+                return
+            s = dlg.settings()
         from .photo_gps import use_photo_gps
         if not use_photo_gps(ch):
             s["reference"] = False
@@ -1795,9 +1809,11 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         original_wd = self.project.default_workdir(ch)
         self._photo_map(ch)  # recover legacy identities before generating new aliases
         import uuid
-        wd = os.path.join(self.project.data_dir, "alignment-" + uuid.uuid4().hex[:12])
+        wd = saved[0] if saved else os.path.join(self.project.data_dir, "alignment-" + uuid.uuid4().hex[:12])
         try:
             mapping = cm.prepare_images(ch, wd)
+            if saved and mapping!=saved[1]['mapping']:
+                raise OSError('Photo aliases changed; start a new alignment instead of resuming')
         except OSError as e:
             QMessageBox.critical(self, "Align Photos", f"Cannot prepare working folder {wd}:\n{e}"); return
         enabled = [c for c in ch.cameras if c.enabled]
@@ -1819,8 +1835,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                 i = infos.get(c.path, {})
                 c.desc, c.width, c.height = i.get("desc", ""), i.get("width", 0), i.get("height", 0)
         names = [mapping[c.path] for c in enabled]
-        s["calibration_groups"] = {mapping[path]: group for path,group in s.get("calibration_groups",{}).items()
-                                   if path in mapping}
+        if not saved:
+            s["calibration_groups"] = {mapping[path]: group for path,group in s.get("calibration_groups",{}).items()
+                                       if path in mapping}
         from .photo_gps import camera_gps
         ch.reference_settings['reported_gps_accuracy'] = s.get('reported_gps_accuracy', False)
         from .photo_gps import camera_accuracies
@@ -1828,12 +1845,14 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         alignment_accuracies = camera_accuracies(ch, mapping) if s.get('gps_priors') else {}
         previous_poses = {mapping[c.path]: {"center":c.est,"rotation":c.rot}
                           for c in enabled if c.aligned and c.est is not None and c.rot is not None}
+        resume_record=saved[1] if saved else alignment_resume.create(wd,ch,s,mapping)
         def prepare_alignment():
             from .engine import execution_settings,feature_executable,bind_steps
             probe_logs=[]
             selected=feature_executable(exe,s)
             s.update(execution_settings(selected,s,wd,probe_logs.append))
-            planned = cm.align_steps(selected, ch, wd, s, names=names, infos=[c.info() for c in enabled])
+            planned = (alignment_resume.steps(selected,wd,resume_record,ch,s) if saved else
+                       cm.align_steps(selected, ch, wd, s, names=names, infos=[c.info() for c in enabled]))
             if previous_poses:
                 path=os.path.join(wd,"preserve_frame.json")
                 with open(path,"w",encoding="utf-8") as fh:
@@ -1859,7 +1878,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             with open(validation_path,"w",encoding="utf-8") as handle:
                 json.dump({"model":os.path.join(wd,"sparse","0")},handle)
             planned.append(("Validating reconstructed geometry",[cm.PYTHON,"validate_model",validation_path],1))
-            return bind_steps(selected,[("log",message,0) for message in probe_logs] + planned)
+            return alignment_resume.instrument(bind_steps(selected,[("log",message,0) for message in probe_logs] + planned),wd,resume_record)
         steps = [("Preparing alignment", prepare_alignment, 1)]
         self.log(f"Align Photos: mode={s['mode']}, accuracy={s['accuracy']}, workdir={wd}")
 
@@ -1887,6 +1906,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                 c.rot = p[1].tolist() if p else None
             ch.tie_points_ply = os.path.join(wd, "tie_points.ply")
             ch.tie_point_count = cm.count_points3d(os.path.join(wd, "sparse_txt", "points3D.txt"))
+            resume_record['phase']='complete'
+            alignment_resume.save(os.path.join(wd,'alignment-resume.json'),resume_record)
             self.set_modified(); self.reload_view()
             self.show_view(self.model_view)
             self._report_unaligned([c for c in enabled if not c.aligned], len(enabled))

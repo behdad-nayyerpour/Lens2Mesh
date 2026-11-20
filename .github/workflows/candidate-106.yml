@@ -1,0 +1,70 @@
+name: Validate Lens2Mesh 1.0.6 incremental candidate
+on:
+  push:
+    branches: ["release/lens2mesh-1.0.6-candidate"]
+    paths: ["photomesh/**", "tests/**", "packaging/**", "tools/validate_alignment_106.py", ".github/workflows/candidate-106.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: candidate-106
+  cancel-in-progress: true
+jobs:
+  candidate:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      QT_QPA_PLATFORM: offscreen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.13'}
+      - name: Install authenticated public baseline in isolation
+        shell: pwsh
+        run: |
+          gh release download v1.0.5 --repo $env:GITHUB_REPOSITORY --pattern Lens2Mesh_Setup_1.0.5.exe --dir baseline
+          if ($LASTEXITCODE) { throw 'Baseline download failed' }
+          $setup=(Get-Item baseline/Lens2Mesh_Setup_1.0.5.exe).FullName
+          if ((Get-FileHash $setup).Hash.ToLowerInvariant() -ne '3eea3e20c22475c9713442aa50f8cd95944a1823f78a4e32336582f26e99083f') { throw 'Unexpected 1.0.5 baseline' }
+          $root=Join-Path $env:RUNNER_TEMP 'lm106'
+          $p=Start-Process $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/portable=1',('/DIR="'+$root+'"'),'/TASKS=""') -Wait -PassThru -WindowStyle Hidden
+          if ($p.ExitCode) { throw 'Baseline installation failed' }
+          "BASELINE=$root" >> $env:GITHUB_ENV
+      - name: Build, install and validate incremental components
+        shell: pwsh
+        run: |
+          python packaging/build_patch.py --baseline "$env:BASELINE" --output candidate --revision '${{ github.sha }}'
+          if ($LASTEXITCODE) { throw 'Candidate build failed' }
+          $zip=Get-ChildItem candidate/Lens2Mesh_TestPatch_*.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName payload
+          $python=Join-Path $env:BASELINE 'python/python.exe'
+          & $python payload/apply_patch.py --root "$env:BASELINE" --payload "$PWD/payload"
+          if ($LASTEXITCODE) { throw 'Candidate application failed' }
+          $env:PYTHONPATH=Join-Path $env:BASELINE 'app'
+          & $python tools/validate_installed_105.py "$env:PYTHONPATH" "$PWD" "$PWD/evidence/ui"
+          if ($LASTEXITCODE) { throw 'Installed source/UI/manual validation failed' }
+          & $python tools/validate_alignment_106.py --app "$env:PYTHONPATH" --exe "$env:BASELINE/tools/colmap-cpu/bin/colmap.exe" --output "$PWD/evidence/native"
+          if ($LASTEXITCODE) { throw 'Native names/snapshot resume validation failed' }
+      - name: Validate exact rollback
+        shell: pwsh
+        run: |
+          $state=Get-ChildItem "$env:BASELINE/.lens2mesh-patches" -Filter state.json -Recurse | Select-Object -First 1
+          if (-not $state) { throw 'Recovery journal missing' }
+          & "$env:BASELINE/python/python.exe" payload/apply_patch.py --root "$env:BASELINE" --rollback $state.Directory.FullName
+          if ($LASTEXITCODE) { throw 'Rollback failed' }
+          'Incremental apply, installed identity/UI/manual, native filename/camera snapshot resume, and rollback passed.' | Set-Content evidence/validation.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Lens2Mesh-106-Candidate
+          path: candidate/
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Lens2Mesh-106-Evidence
+          path: evidence/
+          retention-days: 30

@@ -8,6 +8,9 @@ param(
 )
 $ErrorActionPreference='Stop'
 $source=Split-Path -Parent $PSScriptRoot
+$versionText=Get-Content -LiteralPath (Join-Path $source 'photomesh/__init__.py') -Raw
+if ($versionText -notmatch 'APP_VERSION\s*=\s*"([^"]+)"') { throw 'Application version missing' }
+$version=$Matches[1]
 $runtime=(Resolve-Path -LiteralPath $RuntimeFolder).Path
 $out=[IO.Path]::GetFullPath($OutputDir)
 $addon=Join-Path $out 'neural-addon-stage'
@@ -20,9 +23,10 @@ if ($LASTEXITCODE) { throw 'GPU add-on payload authentication failed' }
 foreach ($name in @('neural_addon.py','apply_patch.py','neural-runtime-assets.json')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $addon 'packaging')
 }
-& $ISCC '/Q' "/DAddonStage=$addon" "/DRuntimeFolder=$runtime" "/DOutputDir=$out" "/DAddonRevision=$Revision" (Join-Path $PSScriptRoot 'neural-addon.iss')
+& $ISCC '/Q' "/DAppVersion=$version" "/DAddonStage=$addon" "/DRuntimeFolder=$runtime" "/DOutputDir=$out" "/DAddonRevision=$Revision" (Join-Path $PSScriptRoot 'neural-addon.iss')
 if ($LASTEXITCODE) { throw 'GPU add-on Setup compilation failed' }
-$file=Join-Path $out 'Lens2Mesh_NeuralGPU_Addon_1.0.5.exe'
+$name="Lens2Mesh_NeuralGPU_Addon_$version.exe"
+$file=Join-Path $out $name
 $hash=(Get-FileHash -LiteralPath $file).Hash.ToLowerInvariant()
-"$hash *Lens2Mesh_NeuralGPU_Addon_1.0.5.exe" | Set-Content "$file.sha256" -Encoding ascii
+"$hash *$name" | Set-Content "$file.sha256" -Encoding ascii
 Write-Host "GPU add-on: $((Get-Item $file).Length) bytes; SHA256 $hash"
