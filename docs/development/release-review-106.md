@@ -37,6 +37,8 @@ follow-up areas. CPU/GPU and legacy/modern engine paths deliberately stay separa
 - Re-probe matching device flags on resume; retain saved feature/pair selection.
 - Restrict resume snapshots to the final sparse model: coarse snapshots belong
   to another feature database and cannot seed final-resolution tracks.
+- Keep mapping eligible through global/hierarchical validation and fallback;
+  enter postprocessing only when a postprocessing command actually starts.
 - Restore raw GPS backup before repeated postprocessing to avoid double transform.
 - Pan using the screen basis at both poles; allow complete elevation/azimuth turns
   while retaining the existing picking and axis-indicator coordinate contract.

@@ -83,8 +83,10 @@ def instrument(steps,workdir,record):
                     save(path,record)
                 action.on_start=before
             if matching or mapping:
-                def after(matching=matching):
-                    record['phase']='mapping' if matching else 'postprocessing'
+                def after():
+                    # Global/hierarchical plans may still validate and fall
+                    # back after the native command exits successfully.
+                    record['phase']='mapping'
                     save(path,record)
                 action.on_success=after
         result.append((label,action,weight))

@@ -55,7 +55,7 @@ def test_final_matching_and_mapper_checkpoints_are_scoped_to_final_database(pend
     final.on_start();assert record['phase']=='matching'
     final.on_success();assert record['phase']=='mapping'
     mapper.on_start();assert record['mapper_kind']=='Incremental'
-    mapper.on_success();assert record['phase']=='postprocessing'
+    mapper.on_success();assert record['phase']=='mapping'
 
 
 def test_dynamic_callback_and_fallback_steps_keep_instrumentation(pending):
