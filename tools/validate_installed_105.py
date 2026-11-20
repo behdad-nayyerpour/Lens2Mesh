@@ -1,5 +1,6 @@
 """Verify a disposable installed candidate against its source checkout, offline."""
 import hashlib
+import ast
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,11 @@ assert digest(app_root / "LICENSE") == digest(source_root / "LICENSE")
 assert digest(app_root / "main.py") == digest(source_root / "main.py")
 sys.path.insert(0, str(app_root))
 import photomesh
-assert photomesh.APP_NAME == 'Lens2Mesh' and photomesh.APP_VERSION == "1.0.5"
+source_values = {node.targets[0].id:node.value.value
+                 for node in ast.parse((source_root/'photomesh/__init__.py').read_text()).body
+                 if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name)
+                 and isinstance(node.value,ast.Constant)}
+assert photomesh.APP_NAME == 'Lens2Mesh' and photomesh.APP_VERSION == source_values['APP_VERSION']
 assert Path(photomesh.__file__).resolve().is_relative_to(app_root)
 def deny(*args, **kwargs):
     raise AssertionError("Installed validation attempted network access")
@@ -53,7 +58,7 @@ from PySide6.QtGui import QDesktopServices
 opened = []
 QDesktopServices.openUrl = lambda url: opened.append(url.toLocalFile()) or True
 assert documentation.open_manual(None)
-assert digest(Path(opened[-1])) == '83bcd31c0ddea7277227045311f5f74117164d7bf96b8dac933296cae02f9faf'
+assert digest(Path(opened[-1])) == documentation.MANUAL_SHA256
 window = MainWindow()
 window.resize(1500, 920)
 window.show()
@@ -71,7 +76,7 @@ for theme in ("Dark", "Light"):
         for _ in range(5): app.processEvents()
         labels = " ".join(label.text() for label in dialog.findChildren(QLabel))
         if "About" in dialog.windowTitle():
-            assert "1.0.5" in labels and "evaluation for company workflows" in labels
+            assert photomesh.APP_VERSION in labels and "evaluation for company workflows" in labels
             assert any(button.text() == "View full license" for button in dialog.findChildren(QPushButton))
             for label in dialog.findChildren(QLabel):
                 if label.wordWrap():

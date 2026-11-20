@@ -404,7 +404,7 @@ def read_images_txt(path):
     with open(path, encoding="utf-8", errors="ignore") as f:
         lines = [l for l in f if not l.startswith("#")]
     for i in range(0, len(lines), 2):
-        parts = lines[i].split()
+        parts = lines[i].rstrip('\r\n').split(maxsplit=9)
         if len(parts) < 10:
             continue
         q = list(map(float, parts[1:5]))
@@ -445,6 +445,7 @@ class PipelineRunner(QObject):
         self._callback_job = None
         self.failure = None          # details of the failed step, for error reports
         self._cmd = None
+        self._command_cleanup = None
         self.finished.connect(self._mark_end)
 
     def _mark_end(self, *_):
@@ -452,6 +453,10 @@ class PipelineRunner(QObject):
 
     def _fail(self, msg, exit_code=None, crashed=False, exc=None):
         import traceback as _tb
+        try:
+            self._cleanup_command(False)
+        except Exception as error:
+            msg += f'; restoring photo identities failed: {error}'
         label = self.steps[self.idx][0] if 0 <= self.idx < len(self.steps) else ""
         args = self.steps[self.idx][1] if 0 <= self.idx < len(self.steps) else None
         self.failure = {"step": label, "message": msg, "exit_code": exit_code, "crashed": crashed,
@@ -459,6 +464,11 @@ class PipelineRunner(QObject):
                         "traceback": "".join(_tb.format_exception(type(exc), exc, exc.__traceback__)) if exc else "",
                         "tail": list(self._tail)}
         self.finished.emit(False, msg)
+
+    def _cleanup_command(self, success):
+        callback, self._command_cleanup = self._command_cleanup, None
+        if callback is not None:
+            callback(success)
 
     def start(self):
         self._next()
@@ -496,7 +506,13 @@ class PipelineRunner(QObject):
             job.start()
             return
         try:
+            if hasattr(args, 'prepare'):
+                self._command_cleanup = args.cleanup
+                for message in args.prepare():
+                    self.log.emit(message)
             prog, pargs = resolve_cmd(self.exe, args)
+            if hasattr(args, 'on_start'):
+                args.on_start()
         except Exception as e:
             if isinstance(args, Try):
                 return self._fallback(args, str(e))
@@ -601,6 +617,11 @@ class PipelineRunner(QObject):
             self._read()
         if self._ended:
             return
+        try:
+            self._cleanup_command(code == 0 and status == QProcess.NormalExit and not self.cancelled)
+        except Exception as error:
+            self._fail(f'Pair matching could not finalize: {error}', exc=error)
+            return
         if self.cancelled:
             self.finished.emit(False, "Cancelled by user")
             return
@@ -616,5 +637,12 @@ class PipelineRunner(QObject):
             else:
                 self._fail(f"'{label}' failed (exit code {exit_code_text(code)}). See Console for details.",
                            exit_code=code, crashed=status != QProcess.NormalExit)
+            return
+        try:
+            action=self.steps[self.idx][1]
+            if hasattr(action,'on_success'):
+                action.on_success()
+        except Exception as error:
+            self._fail(f'Could not save alignment progress: {error}',exc=error)
             return
         self._next()

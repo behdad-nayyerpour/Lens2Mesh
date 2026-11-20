@@ -5,6 +5,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 
 RESOURCES = Path(__file__).resolve().parent / 'resources'
+MANUAL = 'manual/Lens2Mesh_1.0.6_Complete_User_Manual.pdf'
+MANUAL_SHA256 = 'f2d4a9c8cb42bfae0dd33a90598e9351590411205a0f50e52fc8e33ca83f2fe2'
 
 
 def open_bundled(parent, relative, title):
@@ -19,7 +21,7 @@ def open_bundled(parent, relative, title):
 
 
 def open_manual(parent):
-    return open_bundled(parent, 'manual/Lens2Mesh_1.0.5_Complete_User_Manual.pdf', 'User Manual (PDF)')
+    return open_bundled(parent, MANUAL, 'User Manual (PDF)')
 
 
 def open_notices(parent):

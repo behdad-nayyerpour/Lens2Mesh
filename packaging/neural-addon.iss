@@ -1,6 +1,9 @@
 #ifndef AddonStage
   #error AddonStage is required
 #endif
+#ifndef AppVersion
+  #error AppVersion is required
+#endif
 #ifndef OutputDir
   #error OutputDir is required
 #endif
@@ -13,7 +16,7 @@
 [Setup]
 AppId={{4683EF83-5152-455B-9563-8F2D436C227B}
 AppName=Lens2Mesh Neural GPU Add-on
-AppVersion=1.0.5
+AppVersion={#AppVersion}
 AppPublisher=Behdad Nayyerpour
 DefaultDirName={code:GetBaseDir}
 DisableDirPage=no
@@ -31,7 +34,7 @@ Compression=lzma2
 SolidCompression=yes
 LicenseFile={#AddonStage}\addon-license.txt
 OutputDir={#OutputDir}
-OutputBaseFilename=Lens2Mesh_NeuralGPU_Addon_1.0.5
+OutputBaseFilename=Lens2Mesh_NeuralGPU_Addon_{#AppVersion}
 
 [Files]
 Source: "{#RuntimeFolder}\*"; DestDir: "{tmp}\Lens2MeshGpuPayload\app\photomesh\resources\neural-cuda12"; Flags: ignoreversion deleteafterinstall
@@ -58,7 +61,7 @@ begin
   if not FileExists(ExpandConstant('{app}\python\python.exe')) or
      not FileExists(ExpandConstant('{app}\app\runtime.id')) or
      not FileExists(ExpandConstant('{app}\app\photomesh\__init__.py')) then
-    Result := 'Install Lens2Mesh 1.0.5 first, then select its installation folder. Close Lens2Mesh before adding GPU support.';
+    Result := 'Install Lens2Mesh first, then select its installation folder. Close Lens2Mesh before adding GPU support.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
