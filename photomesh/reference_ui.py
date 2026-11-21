@@ -344,15 +344,16 @@ class ReferenceMixin:
         if not dlg.exec():
             return
         s = dlg.settings()
+        local_control_grid = s["local_control_grid"]
         gps_on = use_photo_gps(ch)
         requested_cameras = s["use_cameras"] if gps_on else ch.reference_settings.get("use_cameras", True)
         s["use_cameras"] = gps_on and s["use_cameras"]
-        ch.reference_settings.update(s["accuracies"], use_cameras=requested_cameras,
-                                     use_photo_gps=gps_on, use_markers=s["use_markers"],
-                                     camera_height_reference=s.get("camera_height_reference", "unknown"),
-                                     marker_height_reference=s.get("marker_height_reference", "unknown"),
-                                     reported_gps_accuracy=s.get("reported_gps_accuracy", False),
-                                     intrinsics=s.get("intrinsics", "f,cx,cy,k1-k3,p1,p2"))
+        reference_settings = dict(s["accuracies"], use_cameras=requested_cameras,
+                                  use_photo_gps=gps_on, use_markers=s["use_markers"],
+                                  camera_height_reference=s.get("camera_height_reference", "unknown"),
+                                  marker_height_reference=s.get("marker_height_reference", "unknown"),
+                                  reported_gps_accuracy=s.get("reported_gps_accuracy", False),
+                                  intrinsics=s.get("intrinsics", "f,cx,cy,k1-k3,p1,p2"))
         from .photo_gps import camera_accuracies
         wd = self.project.default_workdir(ch)
         cfg = {"model": self._model_dir(), "photo_sizes": photo_dimensions(ch),
@@ -372,7 +373,9 @@ class ReferenceMixin:
                "result": os.path.join(wd, "georef.json"),
                "transform_files": [p for p in (ch.point_cloud_ply, ch.model_ply,
                                               os.path.join(wd, "dense", "fused.ply")) if p]}
-        if bool(cfg['coordinate_frame']) != (cfg['adjustment_frame'] == 'enu'):
+        if local_control_grid:
+            cfg["crs"] = g.CRS.parse("LOCAL").name
+        if local_control_grid or bool(cfg['coordinate_frame']) != (cfg['adjustment_frame'] == 'enu'):
             cfg['offset'] = None
             cfg['coordinate_frame'] = None
         if not ch.georef and cfg["camera_gps"] and (ch.crs or "") == "" and s["use_cameras"]:
@@ -387,6 +390,11 @@ class ReferenceMixin:
         ready = ((s["use_markers"] and status["usable"] >= 3) or
                  (s["use_cameras"] and status["gps"] >= 3))
         if not ready:
+            if local_control_grid:
+                QMessageBox.information(self, "Local survey grid",
+                    f"{status['usable']} usable control points. To fit the local grid, pin at least "
+                    "three non-collinear controls with XYZ on two or more aligned photos each.")
+                return
             msg = (f"{status['imported']} markers imported; {status['references']} enabled with complete XYZ; "
                    f"{status['usable']} usable controls on at least two aligned photos; "
                    f"{status['gps']} camera GPS positions usable in the selected CRS.\n\n"
@@ -412,6 +420,7 @@ class ReferenceMixin:
 
         def loaded():
             res = json.load(open(cfg["result"], encoding="utf-8"))
+            ch.reference_settings.update(reference_settings)
             if res.get("similarity") is not None:
                 products_after_georef(ch, res["similarity"], self.log)
             self._invalidate_camera_products(ch)

@@ -369,6 +369,7 @@ class OptimizeCamerasDialog(_SettingsDialog):
         from .photo_gps import use_photo_gps
         dataset = getattr(parent, "dataset", None)
         gps_on = use_photo_gps(dataset) if dataset is not None else True
+        self._photo_gps_enabled = gps_on
         self.use_cameras.setChecked(bool(s.get("use_cameras", False)) and gps_on)
         self.use_cameras.setEnabled(gps_on)
         self.use_cameras.setToolTip("Uses valid GPS from enabled photos when Use Photo GPS is enabled in Settings.")
@@ -377,6 +378,20 @@ class OptimizeCamerasDialog(_SettingsDialog):
         self.intr.setToolTip("Preserves each camera model and fits its supported calibration parameters.")
         for w in (self.use_markers, self.use_cameras, self.bundle, self.intr):
             self.gform.addRow(w)
+        self.control_coordinates = QComboBox()
+        project_crs = getattr(dataset, "crs", "") or "Local"
+        current_label = f"Current project reference ({project_crs})" if len(project_crs) < 60 else "Current project reference"
+        self.control_coordinates.addItem(current_label, "current")
+        self.control_coordinates.addItem("Local survey grid (XYZ in metres)", "local")
+        self.control_coordinates.setToolTip(
+            "Choose the coordinate system of the entered control XYZ. Use the local grid "
+            "after GPS alignment only if the control coordinates are already in that grid.")
+        self.gform.addRow("Control coordinates:", self.control_coordinates)
+        self.local_control_note = QLabel(
+            "Fit the existing alignment to the local grid using at least three non-collinear controls. "
+            "Camera GPS and the previous map origin are excluded from this fit.")
+        self.local_control_note.setWordWrap(True)
+        self.gform.addRow(self.local_control_note)
         def dspin(v, dec=3, mx=1000):
             w = QDoubleSpinBox(); w.setDecimals(dec); w.setRange(0.0001, mx); w.setValue(v); return w
         self.cam_acc = dspin(s["camera_accuracy"]); self.cam_acc_z = dspin(s["camera_accuracy_z"])
@@ -416,12 +431,28 @@ class OptimizeCamerasDialog(_SettingsDialog):
         note = QLabel('No geoid or vertical-datum conversion is applied automatically. ENU Up is relative to its tangent origin, not absolute elevation.')
         note.setWordWrap(True)
         self.aform.addRow(note)
+        self.use_markers.toggled.connect(self._update_control_coordinates)
+        self.control_coordinates.currentIndexChanged.connect(self._update_control_coordinates)
+        self._update_control_coordinates()
+
+    def _local_controls(self):
+        return self.use_markers.isChecked() and self.control_coordinates.currentData() == "local"
+
+    def _update_control_coordinates(self):
+        local = self._local_controls()
+        self.control_coordinates.setEnabled(self.use_markers.isChecked())
+        self.local_control_note.setVisible(local)
+        self.use_cameras.setEnabled(self._photo_gps_enabled and not local)
+        self.reported_accuracy.setEnabled(self._photo_gps_enabled and not local)
+        self.adjustment_frame.setEnabled(not local)
 
     def settings(self):
-        return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isChecked(),
+        local = self._local_controls()
+        return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isChecked() and not local,
+                "local_control_grid": local,
                 "bundle": self.bundle.isChecked(), "fit_intrinsics": self.intr.isChecked(),
                 "tie_points": self.ties.value(),
-                "adjustment_frame": self.adjustment_frame.currentData(),
+                "adjustment_frame": "projected" if local else self.adjustment_frame.currentData(),
                 "intrinsics": 'all' if self.intrinsic_preset.currentText() == 'All supported coefficients' else self.intrinsic_preset.currentText(),
                 "reported_gps_accuracy": self.reported_accuracy.isChecked() and self.use_cameras.isChecked(),
                 "camera_height_reference": self.height_references['camera'].currentData(),

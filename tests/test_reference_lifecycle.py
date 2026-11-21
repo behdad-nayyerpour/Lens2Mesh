@@ -136,6 +136,66 @@ def test_optimize_preflight_offers_local_mode_explicitly(window, tmp_path, monke
         assert "local bundle adjustment" in ran[0][0][1][0][0]
 
 
+@pytest.mark.parametrize("control_count", [2, 3])
+def test_optimize_transfers_gps_alignment_to_local_survey_grid(window, tmp_path, monkeypatch, control_count):
+    from PySide6.QtWidgets import QMessageBox
+    from photomesh.dialogs import OptimizeCamerasDialog
+
+    ch = _scene(window, tmp_path)
+    ch.crs = "EPSG:4326"
+    old_offset = [566200.0, 4280200.0, 1500.0]
+    ch.georef = {"crs": ch.crs, "crs_kind": "wgs84", "offset": old_offset}
+    old_reference_settings = {"use_cameras": True}
+    ch.reference_settings = old_reference_settings.copy()
+    model = window._sparse_model()
+    translation = np.array([26000, 22000, 1400])
+    for index, xyz in enumerate(((102, 95, 0), (118, 105, 0), (130, 91, 3))[:control_count]):
+        projections = {}
+        for image_id, image in model.images.items():
+            pixel = g.predict_projection(model, image_id, xyz)
+            if pixel is not None:
+                projections[image.name] = [*pixel, True]
+        assert len(projections) >= 2
+        marker = g.Marker(f"P{index}", (np.asarray(xyz) + translation).tolist(), projections=projections)
+        ch.markers.append(marker.to_dict())
+    original_markers = copy.deepcopy(ch.markers)
+
+    def choose_local(dialog):
+        dialog.use_cameras.setChecked(True)
+        dialog.adjustment_frame.setCurrentIndex(1)
+        dialog.control_coordinates.setCurrentIndex(dialog.control_coordinates.findData("local"))
+        assert not dialog.use_cameras.isEnabled()
+        assert not dialog.adjustment_frame.isEnabled()
+        dialog.bundle.setChecked(False)
+        return 1
+
+    monkeypatch.setattr(OptimizeCamerasDialog, "exec", choose_local)
+    messages, submitted = [], []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
+    monkeypatch.setattr(window, "_run", lambda *args: submitted.append(args))
+    window.optimize_cameras()
+    assert ch.crs == "EPSG:4326" and ch.georef["offset"] == old_offset
+    assert ch.markers == original_markers and ch.reference_settings == old_reference_settings
+    if control_count == 2:
+        assert not submitted and "2 usable control points" in messages[0]
+        return
+
+    assert len(submitted) == 1 and not messages
+    cfg = json.loads((tmp_path / "work/georef_task.json").read_text())
+    assert cfg["offset"] is None and cfg["coordinate_frame"] is None
+    assert cfg["adjustment_frame"] == "projected"
+    assert not cfg["use_cameras"] and not cfg["camera_gps"]
+    result = g.run_task(cfg, log=lambda *_: None)
+    assert result["crs_kind"] == "local"
+    assert result["control_rmse"]["total"] < 1e-5
+    assert result["offset"] == [26100.0, 22100.0, 1400.0]
+    monkeypatch.setattr(window, "_reload_alignment", lambda *_: None)
+    submitted[0][2]()
+    assert g.CRS.parse(ch.crs).kind == "local" and ch.georef["offset"] == result["offset"]
+    assert [(m["ref"], m["projections"]) for m in ch.markers] == [
+        (m["ref"], m["projections"]) for m in original_markers]
+
+
 def test_local_optimization_reduces_error_and_retains_frame(tmp_path):
     model = synthetic_model(n_img=5, n_pts=250)
     rng = np.random.default_rng(94)
