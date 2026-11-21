@@ -77,6 +77,21 @@ def test_alignment_has_four_resolutions_and_explicit_default(window):
     assert "Engine default" in d.key_limit.specialValueText()
 
 
+def test_alignment_appearance_preview_does_not_configure_ground_controls(window):
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QDialogButtonBox, QLabel
+    from photomesh.dialogs import AlignPhotosDialog
+
+    dialog = AlignPhotosDialog(window)
+    assert dialog.button_box.button(QDialogButtonBox.Ok).text() == "Align"
+    assert not dialog.control_preview.isEnabled() and not dialog.control_preview.isChecked()
+    assert not any(label.text().startswith("A successful run") for label in dialog.findChildren(QLabel))
+    assert dialog.summary.palette().color(QPalette.WindowText) != dialog.palette().color(QPalette.WindowText)
+    before = dialog.settings()
+    dialog.control_preview.setChecked(True)
+    assert dialog.settings() == before
+
+
 def test_ortho_only_effective_controls_active(window):
     from photomesh.dialogs import BuildOrthomosaicDialog
     d=BuildOrthomosaicDialog(window)

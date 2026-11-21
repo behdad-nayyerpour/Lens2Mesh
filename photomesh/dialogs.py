@@ -1,5 +1,6 @@
 """Processing settings dialogs, progress dialog and preferences."""
 from PySide6.QtCore import QSettings
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QSpinBox, QCheckBox, QDialogButtonBox,
     QVBoxLayout, QGroupBox, QLabel, QProgressBar, QPlainTextEdit, QPushButton,
@@ -41,7 +42,7 @@ class _SettingsDialog(QDialog):
         self.aform = QFormLayout(self.advanced)
         lay.addWidget(self.general)
         lay.addWidget(self.advanced)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb = self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         outer.addWidget(bb)
@@ -63,12 +64,13 @@ class _SettingsDialog(QDialog):
 class AlignPhotosDialog(_SettingsDialog):
     def __init__(self, parent=None):
         super().__init__("Align Photos", parent)
+        self.button_box.button(QDialogButtonBox.Ok).setText("Align")
         self.accuracy = _combo(["High", "Medium", "Low", "Lowest"], "High")
         for index,(label,value) in enumerate((("Full","High"),("Half","Medium"),("Quarter","Low"),("One eighth","Lowest"))):
             self.accuracy.setItemText(index,label); self.accuracy.setItemData(index,value)
-        self.generic = QCheckBox("Generic preselection")
+        self.generic = QCheckBox("Choose photo pairs by visual similarity")
         self.generic.setChecked(True)
-        self.reference = QCheckBox("GPS pair preselection")
+        self.reference = QCheckBox("Use GPS to choose nearby photo pairs")
         from .photo_gps import use_photo_gps
         dataset = getattr(parent, "dataset", None)
         self.photo_gps_on = use_photo_gps(dataset) if dataset is not None else True
@@ -79,7 +81,7 @@ class AlignPhotosDialog(_SettingsDialog):
         self.mode = _combo(["Fast", "Exhaustive", "Sequential"], "Fast")
         self.mode.setToolTip("Fast: fastpipe pair preselection (GPS + global descriptor + sequence)\n"
                              "with coarse-to-fine alignment. Exhaustive: match all pairs.")
-        self.c2f = QCheckBox("Coarse-to-fine (align downscaled first)")
+        self.c2f = QCheckBox("Align at low resolution first, then refine")
         self.c2f.setChecked(True)
         self.gform.addRow("Matching mode:", self.mode)
         self.mapper = _combo(["Auto", "Global", "Incremental", "Hierarchical"], "Auto")
@@ -102,7 +104,7 @@ class AlignPhotosDialog(_SettingsDialog):
             self.neural_warning.setVisible(self.feature_method.currentText() != "SIFT")
         self.feature_method.currentTextChanged.connect(update_neural_warning)
         update_neural_warning()
-        self.gps_frame = QCheckBox("Apply photo GPS to model scale, orientation and location")
+        self.gps_frame = QCheckBox("Use photo GPS to locate, scale and orient the model")
         cameras = getattr(getattr(parent, "dataset", None), "cameras", [])
         from .engine import gps_frame_available
         project_dataset=getattr(parent,"dataset",None)
@@ -112,23 +114,23 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_frame.setEnabled(ready and self.photo_gps_on)
         self.gps_frame.setToolTip(reason if self.photo_gps_on else "Photo GPS is disabled in Settings.")
         self.gform.addRow(self.gps_frame)
-        self.gps_priors = QCheckBox('Constrain aligned cameras with photo GPS (bundle adjustment)')
+        self.gps_priors = QCheckBox("Also constrain individual camera positions with GPS")
         self.gps_priors.setToolTip('Optional position constraints after image-based reconstruction. Uses the selected GPS accuracy; control markers are not silently added to initial alignment.')
         self.gps_priors.setEnabled(self.gps_frame.isChecked())
         self.gps_frame.toggled.connect(self.gps_priors.setEnabled)
         self.gform.addRow(self.gps_priors)
+        self.control_preview = QCheckBox("Use ground control points (preview only)")
+        self.control_preview.setEnabled(False)
+        self.gform.addRow(self.control_preview)
         self.gform.addRow(self.c2f)
         self.gform.addRow("Image resolution:", self.accuracy)
         self.gform.addRow(self.generic)
         row = QHBoxLayout()
         row.addWidget(self.reference)
         self.gform.addRow(row)
-        note = QLabel("A successful run replaces camera alignment and tie points. Failure keeps the previous result.")
-        note.setWordWrap(True)
-        self.gform.addRow(note)
         self.key_limit = QSpinBox(); self.key_limit.setRange(0, 1_000_000); self.key_limit.setSpecialValueText("Engine default"); self.key_limit.setValue(24000)
-        self.guided = QCheckBox("Guided image matching")
-        self.single_camera = QCheckBox("Share calibration between compatible photos")
+        self.guided = QCheckBox("Find extra matches using image geometry")
+        self.single_camera = QCheckBox("Share lens calibration between compatible photos")
         self.single_camera.setChecked(True)
         from .colmap_io import MODEL_ID
         self.camera_model = QComboBox()
@@ -139,7 +141,7 @@ class AlignPhotosDialog(_SettingsDialog):
         self.camera_model.setCurrentIndex(max(0, self.camera_model.findData(stored_model)))
         self.camera_model.setToolTip("Choose a model supported by the lens. Fisheye models are for fisheye lenses; more coefficients need stronger image geometry.")
         self.aform.addRow("Camera model:", self.camera_model)
-        self.reported_accuracy = QCheckBox('Use reported photo GPS deviations (confirm units are metres)')
+        self.reported_accuracy = QCheckBox("Use GPS accuracy recorded in photos (confirm units are metres)")
         self.reported_accuracy.setChecked(bool(getattr(parent, 'dataset', None) and parent.dataset.reference_settings.get('reported_gps_accuracy', False)))
         self.reported_accuracy.setToolTip('Opt-in DJI XMP receiver deviations. Missing/invalid values use the project accuracy; RTK status alone is never an accuracy guarantee.')
         self.aform.addRow(self.reported_accuracy)
@@ -161,6 +163,10 @@ class AlignPhotosDialog(_SettingsDialog):
         pair_mode(self.mode.currentText())
         from .workflow_ui import alignment_context
         alignment_context(self, parent)
+        palette = self.summary.palette()
+        gray = "#afb2b7" if palette.color(QPalette.Window).lightness() < 128 else "#63676e"
+        palette.setColor(QPalette.WindowText, QColor(gray))
+        self.summary.setPalette(palette)
 
     def settings(self):
         QSettings().setValue('align/camera_model', self.camera_model.currentData())
