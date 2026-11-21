@@ -527,6 +527,9 @@ class PipelineRunner(QObject):
             env = QProcessEnvironment()
             for k, v in task_env().items():
                 env.insert(k, v)
+            if len(args) > 1 and args[1] == "georef":
+                # The matrix-free solve makes many short BLAS reductions.
+                env.insert("OPENBLAS_NUM_THREADS", "1")
             self.proc.setProcessEnvironment(env)
         else:
             from PySide6.QtCore import QProcessEnvironment

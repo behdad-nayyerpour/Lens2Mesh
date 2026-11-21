@@ -2,6 +2,44 @@
 import numpy as np
 
 
+ITERATIVE_CAMERA_LIMIT = 3000
+
+
+def solve_camera_schur(camera, coupling_scaled, coupling_transpose, rhs, log=print):
+    """Apply the damped Schur complement without assembling or factoring it."""
+    import time
+    from scipy.sparse.linalg import LinearOperator, cg
+
+    diagonal = camera.diagonal() - np.asarray(coupling_scaled.multiply(coupling_transpose.T).sum(axis=1)).ravel()
+    if not np.isfinite(diagonal).all() or np.any(diagonal <= 0):
+        raise np.linalg.LinAlgError("The camera system has an invalid Schur diagonal")
+    scale = 1 / np.sqrt(diagonal)
+
+    def matvec(value):
+        unscaled = scale * value
+        return scale * (camera @ unscaled - coupling_scaled @ (coupling_transpose @ unscaled))
+
+    operator = LinearOperator(camera.shape, matvec=matvec, dtype=np.float64)
+    last_update = time.monotonic()
+    iterations = 0
+
+    def heartbeat(_):
+        nonlocal last_update, iterations
+        iterations += 1
+        now = time.monotonic()
+        if now - last_update >= 5:
+            log(f"  Sparse camera solve: {iterations} iterations")
+            last_update = now
+
+    scaled_rhs = scale * rhs
+    tolerance = 1e-7
+    solution, info = cg(operator, scaled_rhs, rtol=tolerance, maxiter=800, callback=heartbeat)
+    residual = np.linalg.norm(operator @ solution - scaled_rhs)
+    if info or not np.isfinite(residual) or residual > tolerance * np.linalg.norm(scaled_rhs) * 2:
+        raise np.linalg.LinAlgError(f"Sparse camera solve did not converge after {iterations} iterations")
+    return scale * solution
+
+
 def solve_camera_system(matrix, rhs, dense_limit=768):
     """Direct solve of the same damped Schur system; no iterative approximation.
 

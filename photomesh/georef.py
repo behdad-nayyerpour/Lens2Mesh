@@ -704,7 +704,7 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
     Returns {"markers": {label: X}, "tie_rms_px", "iterations"}.
     """
     import scipy.sparse as sp
-    from .survey_capacity import solve_camera_system
+    from .survey_capacity import ITERATIVE_CAMERA_LIMIT, solve_camera_schur, solve_camera_system
     from scipy.spatial.transform import Rotation
     o = {"tie_points": 40000, "tie_accuracy": 1.0, "projection_accuracy": 0.5,
          "fit_intrinsics": True, "intrinsics": "f,cx,cy,k1-k3,p1,p2", "max_iterations": 30,
@@ -765,6 +765,7 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
     priors = [(ipos[i], np.asarray(c, float), np.asarray(s, float))
               for i, (c, s) in (cam_priors or {}).items() if i in ipos]
     n_cam = 6 * nI + nk * nC                     # reduced (camera side) system size
+    iterative = n_cam >= ITERATIVE_CAMERA_LIMIT
     log(f"GCP bundle adjustment: {nI} cameras, {nC} camera group(s), {nT:,} tie points "
         f"({len(t_pt):,} projections), {nM} GCPs ({len(m_pt)} projections, {len(ctrl)} control), "
         f"{len(priors)} camera GPS priors, intrinsics: {o['intrinsics'] if nk else 'fixed'}")
@@ -806,7 +807,11 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
         raise ValueError("Initial bundle residuals are non-finite; check observations and calibration")
     c0 = cur
     it = 0
-    for it in range(1, int(o["max_iterations"]) + 1):
+    limit = int(o["max_iterations"])
+    if iterative:
+        log("Large camera block: using a bounded-memory iterative Schur solve.")
+    for it in range(1, limit + 1):
+        log(f"[{it - 1}/{limit}] Bundle adjustment iteration {it}: linearizing observations")
         r, Xc = residuals(R, C, K, X)
         Kobs = K[cam_of_img[o_img]]
         # d(uv)/d(Xc) by central differences (3 evals), d(uv)/dK (nk evals)
@@ -862,7 +867,10 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
         Wrows = np.repeat(ocols, 3, 1).ravel()
         Wcols = (3 * o_pt[:, None, None] + np.arange(3)[None, None, :]).repeat(nb, 1).ravel()
         W = sp.csr_matrix((AtB.ravel(), (Wrows, Wcols)), shape=(n_cam, 3 * nP))
+        Wt = W.T.tocsr()
         accepted = False
+        solved = False
+        failure = None
         for _ in range(10):
             Ud = U + sp.diags(lam * np.maximum(U.diagonal(), 1e-9))
             Vd = V + lam * np.einsum("nii->ni", V)[:, :, None] * np.eye(3)
@@ -870,13 +878,19 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
             Vinv = np.linalg.inv(Vd)
             Vi = _block_diag_csr(Vinv)
             WVi = W @ Vi
-            S = Ud - WVi @ W.T
             rhs = gc - WVi @ gp.ravel()
             try:
-                dc = solve_camera_system(S, rhs)
-            except np.linalg.LinAlgError:
+                if iterative:
+                    dc = solve_camera_schur(Ud, WVi, Wt, rhs, log)
+                else:
+                    dc = solve_camera_system(Ud - WVi @ Wt, rhs)
+            except np.linalg.LinAlgError as error:
+                failure = error
+                if iterative:
+                    log(f"  {error}; increasing damping.")
                 lam *= 10; continue
-            dp = np.einsum("nij,nj->ni", Vinv, gp - (W.T @ dc).reshape(nP, 3))
+            solved = True
+            dp = np.einsum("nij,nj->ni", Vinv, gp - (Wt @ dc).reshape(nP, 3))
             dw = dc[:6 * nI].reshape(nI, 6)
             Rn = Rotation.from_rotvec(dw[:, :3]).as_matrix() @ R
             Cn = C + dw[:, 3:]
@@ -891,6 +905,8 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
                 lam = max(lam / 3, 1e-7); accepted = True
                 break
             lam *= 10
+        if iterative and not solved:
+            raise ValueError("Camera adjustment could not solve this block. The previous model was kept.") from failure
         if o.get("verbose"):
             log(f"    it {it}: cost {cur:.6g} lambda {lam:.1e} {'accepted' if accepted else 'rejected'}")
         if not accepted or rel < 1e-7:
@@ -899,6 +915,7 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
     else:
         why = "max iterations"
     log(f"  stopped: {why}")
+    log("Recomputing tie points and diagnostics with the adjusted cameras.")
     rr, _ = residuals(R, C, K, X)
     nt = len(t_pt)
     log(f"  chi2: tie projections {np.sum(rr[:nt] ** 2):.4g} (n={nt}), GCP projections "
