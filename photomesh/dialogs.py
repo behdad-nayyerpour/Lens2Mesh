@@ -30,7 +30,9 @@ class _SettingsDialog(QDialog):
         body = QWidget()
         self.content_layout = QVBoxLayout(body)
         lay = self.content_layout
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(body)
+        scroll = self.settings_scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
         outer.addWidget(scroll, 1)
         self.setMinimumWidth(560)
         screen = self.screen()
@@ -114,16 +116,16 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_frame.setEnabled(ready and self.photo_gps_on)
         self.gps_frame.setToolTip(reason if self.photo_gps_on else "Photo GPS is disabled in Settings.")
         self.gform.addRow(self.gps_frame)
+        self.control_preview = QCheckBox("Use ground control point to locate, scale and orient the model")
+        self.control_preview.setEnabled(False)
+        self.gform.addRow(self.control_preview)
         self.gps_priors = QCheckBox("Also constrain individual camera positions with GPS")
         self.gps_priors.setToolTip('Optional position constraints after image-based reconstruction. Uses the selected GPS accuracy; control markers are not silently added to initial alignment.')
         self.gps_priors.setEnabled(self.gps_frame.isChecked())
         self.gps_frame.toggled.connect(self.gps_priors.setEnabled)
         self.gform.addRow(self.gps_priors)
-        self.control_preview = QCheckBox("Use ground control points (preview only)")
-        self.control_preview.setEnabled(False)
-        self.gform.addRow(self.control_preview)
-        self.gform.addRow(self.c2f)
         self.gform.addRow("Image resolution:", self.accuracy)
+        self.gform.addRow(self.c2f)
         self.gform.addRow(self.generic)
         row = QHBoxLayout()
         row.addWidget(self.reference)
@@ -167,6 +169,22 @@ class AlignPhotosDialog(_SettingsDialog):
         gray = "#afb2b7" if palette.color(QPalette.Window).lightness() < 128 else "#63676e"
         palette.setColor(QPalette.WindowText, QColor(gray))
         self.summary.setPalette(palette)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.layout().activate()
+        scroll = self.settings_scroll
+        body = scroll.widget()
+        viewport = scroll.maximumViewportSize()
+        content_height = max(body.minimumSizeHint().height(), body.layout().totalHeightForWidth(viewport.width()))
+        controls_height = self.height() - viewport.height()
+        available = self.screen().availableGeometry()
+        decoration = max(46, self.frameGeometry().height() - self.height() + 12)
+        max_height = available.height() - decoration
+        self.setMaximumHeight(max_height)
+        self.resize(self.width(), min(max(self.height(), content_height + controls_height + 4), max_height))
+        if self.frameGeometry().bottom() > available.bottom():
+            self.move(self.x(), max(available.top(), self.y() - (self.frameGeometry().bottom() - available.bottom())))
 
     def settings(self):
         QSettings().setValue('align/camera_model', self.camera_model.currentData())
