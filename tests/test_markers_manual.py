@@ -72,7 +72,7 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
     header = pane.horizontalHeader()
     assert header.visualIndex(6) == header.visualIndex(7) + 1
     assert header.visualIndex(10) == header.visualIndex(6) + 1
-    assert pane.columnWidth(1) >= 101
+    assert pane.columnWidth(1) >= pane.MIN_WIDTHS[1]
     assert pane.item(0, 9).text() == "Measured"
     assert pane.item(0, 10).text() == "1"
 

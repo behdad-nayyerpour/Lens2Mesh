@@ -484,7 +484,7 @@ class MarkersPane(QTableWidget):
     makes the marker a control (checked) or check (unchecked) point."""
     COLS = ["Point", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
             "Error (m)", "Pins", "Error (px)", "Role", "Status", "Auto"]
-    MIN_WIDTHS = (84, 101, 101, 94, 105, 84, 68, 90, 77, 167, 70)
+    MIN_WIDTHS = (78, 92, 96, 88, 91, 72, 48, 78, 64, 116, 48)
     EDITABLE = (0, 1, 2, 3, 4)
     markerActivated = Signal(str)
     markerToggled = Signal(str, bool)
@@ -523,7 +523,7 @@ class MarkersPane(QTableWidget):
             with bulk_fill(self):
                 controls_with_pins = self._fill(dataset)
             for column, width in enumerate(self.MIN_WIDTHS):
-                self.setColumnWidth(column, max(width, self.columnWidth(column) + 14))
+                self.setColumnWidth(column, max(width, self.columnWidth(column) + 5))
         finally:
             self._busy = False
         self.presentationUpdated.emit(dataset, controls_with_pins)
@@ -694,7 +694,7 @@ def markers_panel(table, import_points):
     from PySide6.QtWidgets import QTabBar
     panel = QWidget()
     layout = QVBoxLayout(panel)
-    layout.setContentsMargins(4, 4, 4, 4)
+    layout.setContentsMargins(4, 4, 4, 16)
     layout.setSpacing(5)
     top = QHBoxLayout()
     top.addStretch()
