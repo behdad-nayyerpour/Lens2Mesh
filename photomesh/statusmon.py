@@ -96,7 +96,7 @@ def _windows_gpu_sample():
         return None
     from .report import _run
     output = _run([executable, "-i", "0", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
-                   "--format=csv,noheader,nounits"], timeout=2)
+                   "--format=csv,noheader,nounits"], timeout=4)
     for row in csv.reader(output.splitlines(), skipinitialspace=True):
         if len(row) != 4:
             continue
