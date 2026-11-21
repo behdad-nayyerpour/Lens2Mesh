@@ -62,7 +62,7 @@ def test_marker_errors_have_separate_noneditable_summary(window):
         assert not summary.isRowHidden(0) and not summary.isRowHidden(1)
 
 
-def test_camera_error_footer_is_under_error_column_and_not_a_camera(window):
+def test_camera_error_summary_is_separate_and_updates_with_gps_policy(window):
     east, north = g.utm_forward(np.array([40.]), np.array([44.]), 38, False)
     E, N = float(east[0]), float(north[0])
     ch = window.dataset
@@ -70,19 +70,25 @@ def test_camera_error_footer_is_under_error_column_and_not_a_camera(window):
     ch.georef = {"crs": ch.crs, "offset": [0., 0., 0.]}
     ch.cameras = [Camera("A.jpg", lon=44., lat=40., alt=100., est=[E+3, N+4, 100.]),
                   Camera("B.jpg", lon=44., lat=40., alt=100., est=[E+1000, N, 100.],
-                         use_reference=False)]
+                         use_reference=False, enabled=False)]
     window.refresh_all()
     table = window.reference
-    assert table.data_row_count == 2 and table.rowCount() == 3
-    assert table.summary_row == 2
-    assert table.item(2, 0).text() == "Total Error"
-    assert table.item(2, 5).text() == "—"  # conservative migration of legacy GPS opt-outs
-    assert all(table.item(2, column).text() == "" for column in (1, 2, 3, 4, 6, 7, 8))
-    assert not hasattr(table, "_summary_label")
+    assert table.data_row_count == table.rowCount() == 2
+    assert table.rowHeight(0) == window.markers_pane.verticalHeader().defaultSectionSize()
+    summary = table.summary_table
+    assert window.docks["Cameras"].widget().isAncestorOf(summary)
+    assert summary.rowCount() == 1 and summary.item(0, 0).text() == "Cameras"
+    assert summary.item(0, 1).text() == "—"  # conservative migration of legacy GPS opt-outs
+    assert not summary.item(0, 1).flags() & (Qt.ItemIsEditable | Qt.ItemIsSelectable)
+    ch.reference_settings["use_photo_gps"] = True
+    table.refresh(ch)
+    assert table.item(0, 5).text() == summary.item(0, 1).text() == "5.000"
+    assert table.error_summary == {"error": 5.0, "measured": 1}
     activated = []
     table.cameraActivated.connect(activated.append)
     table._activate_camera(2, 0)
-    assert activated == []
+    table._activate_camera(0, 0)
+    assert activated == [0]
 
 
 def test_properties_belongs_to_workspace_only_and_uses_compact_rows(window):
@@ -92,7 +98,7 @@ def test_properties_belongs_to_workspace_only_and_uses_compact_rows(window):
     assert workspace is window.workspace_splitter
     assert workspace.isAncestorOf(window.properties)
     assert not window.docks["Cameras"].isAncestorOf(window.properties)
-    assert window.docks["Cameras"].widget() is window.reference
+    assert window.docks["Cameras"].widget().isAncestorOf(window.reference)
     window.properties.show_props({f"Property {i}": f"Value {i}" for i in range(30)})
     assert window.properties.rowCount() == 30
     assert window.properties.rowHeight(0) <= max(18, window.properties.fontMetrics().height()+2)

@@ -23,7 +23,7 @@ from .dialogs import (AlignPhotosDialog, BuildPointCloudDialog, BuildModelDialog
                       BuildDEMDialog, BuildOrthomosaicDialog, ExportRasterDialog)
 from .menus import MENUS, ACTION_LABELS, LEGACY_ACTION_GROUPS
 from .panes import (WorkspacePane, ReferencePane, MarkersPane, PhotosPane, ConsolePane,
-                    PropertiesPane, JobsPane, markers_panel)
+                    PropertiesPane, JobsPane, cameras_panel, markers_panel)
 from . import procmeta
 from .plyio import load_ply, ply_counts, vertex_normals
 from .project import Project, ProjectData, IMAGE_EXTS, data_folder
@@ -209,7 +209,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             "Markers": self._dock("Ground Control Point",
                                   markers_panel(self.markers_pane, self._safe("Import Markers", self.import_markers)),
                                   L, "markers"),
-            "Cameras": self._dock("Cameras", self.reference, L, "cameras"),
+            "Cameras": self._dock("Cameras", cameras_panel(self.reference), L, "cameras"),
             "Photos": self._dock("Photos", photos_panel, R, "photos"),
             "Console": self._dock("Console", self.console, B, "console"),
             "Jobs": self._dock("Jobs", self.jobs, B, "jobs"),

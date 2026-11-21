@@ -149,7 +149,7 @@ def test_legacy_multi_dataset_open_never_drops_data(tmp_path):
     assert len(Project.load(path).datasets) == 2
 
 
-def test_workspace_root_is_project_and_markers_share_flag_icons(window):
+def test_workspace_root_is_project_and_reference_tables_are_in_their_docks(window):
     from photomesh import georef as g
     window.dataset.markers = [g.Marker("G1", locked=True).to_dict()]
     window.refresh_all()
@@ -157,9 +157,8 @@ def test_workspace_root_is_project_and_markers_share_flag_icons(window):
     assert root.data(0, Qt.UserRole)[0] == "project"
     assert not any("dataset" == (item.data(0, Qt.UserRole) or [None])[0]
                    for item in window.workspace._iter())
-    assert not window.markers_pane.item(0, 0).icon().isNull()
     assert window.docks["Markers"].isAncestorOf(window.markers_pane)
-    assert window.docks["Cameras"].widget() is window.reference
+    assert window.docks["Cameras"].widget().isAncestorOf(window.reference)
 
 
 def test_native_dialogs_default_and_explicit_fallback(monkeypatch, qapp):

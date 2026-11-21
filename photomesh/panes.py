@@ -30,6 +30,19 @@ def summary_item(text="", tooltip=""):
     return item
 
 
+def error_summary_table(table, rows, headers):
+    summary = QTableWidget(rows, len(headers))
+    summary.setHorizontalHeaderLabels(headers)
+    summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    summary.verticalHeader().hide()
+    row_height = table.verticalHeader().defaultSectionSize()
+    summary.verticalHeader().setDefaultSectionSize(row_height)
+    summary.setFixedHeight(summary.horizontalHeader().sizeHint().height() + rows * row_height + 4)
+    summary.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    summary.setAlternatingRowColors(True)
+    return summary
+
+
 @contextlib.contextmanager
 def bulk_fill(table):
     """Fill a QTableWidget fast. With QHeaderView.ResizeToContents every
@@ -375,6 +388,7 @@ class ReferencePane(QTableWidget):
     COLS = ["Cameras", "X / Longitude", "Y / Latitude", "Z / Altitude", "Accuracy (m)",
             "Error (m)", "X estimated", "Y estimated", "Z estimated"]
     cameraActivated = Signal(int)
+    errorSummaryUpdated = Signal(object, int)
 
     def __init__(self, parent=None):
         super().__init__(0, len(self.COLS), parent)
@@ -383,6 +397,7 @@ class ReferencePane(QTableWidget):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(True)
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 7)
         self._filling = False
         self.cellClicked.connect(self._activate_camera)
 
@@ -406,7 +421,7 @@ class ReferencePane(QTableWidget):
             with bulk_fill(self):
                 self.clearContents()
                 self.data_row_count = len(dataset.cameras)
-                self.setRowCount(self.data_row_count + 1)
+                self.setRowCount(self.data_row_count)
                 geo = dataset.georef or {}
                 try:
                     crs = CRS.parse(geo.get("crs") or dataset.crs)
@@ -461,18 +476,32 @@ class ReferencePane(QTableWidget):
                         self.setItem(row, col, item)
                     if row in selected:
                         self.selectRow(row)
-                self.summary_row = self.data_row_count
-                rmse = math.sqrt(sum(x * x for x in errors) / len(errors)) if errors else None
-                self.error_summary = {"error": rmse, "measured": len(errors)}
-                tip = f"Camera RMSE from {len(errors)} GPS references with measured errors."
-                for column in range(self.columnCount()):
-                    self.setItem(self.summary_row, column, summary_item(tooltip=tip))
-                self.item(self.summary_row, 0).setText("Total Error")
-                self.item(self.summary_row, 5).setText(_fmt(rmse, 3) if rmse is not None else "—")
         finally:
             self._filling = False
             self.verticalScrollBar().setValue(scroll)
+        rmse = math.sqrt(sum(x * x for x in errors) / len(errors)) if errors else None
+        self.error_summary = {"error": rmse, "measured": len(errors)}
+        self.errorSummaryUpdated.emit(rmse, len(errors))
 
+
+def cameras_panel(table):
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(4, 4, 4, 16)
+    layout.setSpacing(5)
+    layout.addWidget(table, 1)
+    layout.addWidget(QLabel("Error summary (RMSE)"))
+    summary = table.summary_table = error_summary_table(table, 1, ["Group", "Error (m)"])
+    layout.addWidget(summary)
+
+    def update_summary(rmse, measured):
+        tip = f"Camera RMSE from {measured} GPS references with measured errors."
+        summary.setItem(0, 0, summary_item("Cameras", tip))
+        summary.setItem(0, 1, summary_item(_fmt(rmse, 3) or "—", tip))
+
+    table.errorSummaryUpdated.connect(update_summary)
+    update_summary(None, 0)
+    return panel
 
 
 class MarkersPane(QTableWidget):
@@ -723,15 +752,7 @@ def markers_panel(table, import_points):
     layout.addWidget(groups); layout.addWidget(table, 1)
 
     layout.addWidget(QLabel("Error summary (RMSE)"))
-    summary = table.summary_table = QTableWidget(2, 3)
-    summary.setHorizontalHeaderLabels(["Point group", "Error (m)", "Error (px)"])
-    summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-    summary.verticalHeader().hide()
-    row_height = table.fontMetrics().height() + 7
-    summary.verticalHeader().setDefaultSectionSize(row_height)
-    summary.setFixedHeight(summary.horizontalHeader().sizeHint().height() + 2 * row_height + 4)
-    summary.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    summary.setAlternatingRowColors(True)
+    summary = table.summary_table = error_summary_table(table, 2, ["Point group", "Error (m)", "Error (px)"])
     layout.addWidget(summary)
 
     details = QLabel()
