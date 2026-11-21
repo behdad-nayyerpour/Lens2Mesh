@@ -4,21 +4,23 @@ on the GUI thread) and delivered through a queued Qt signal.
 * CPU: psutil.cpu_percent(None) (non-blocking, since the previous call) when
   psutil is installed, else the system CPU times (Windows GetSystemTimes via
   ctypes, Linux /proc/stat) - no extra package needed.
-* GPU: NVIDIA NVML loaded with ctypes from the display driver (nvml.dll /
-  libnvidia-ml.so.1, already installed with the driver): utilisation and
-  memory of GPU 0. No NVIDIA driver -> the GPU field is hidden. nvidia-smi is
-  never started. Everything is local / offline.
+* GPU: NVIDIA NVML loaded from the display driver. On Windows, a failed
+  sample retries periodically and can use the driver's nvidia-smi as a
+  local fallback. Both report utilisation and memory of GPU 0.
 """
 from __future__ import annotations
 
 import ctypes
+import csv
 import os
 import sys
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 
 INTERVAL = 1.5
+GPU_RETRY_INTERVAL = 8.0
 
 
 # ---------------------------------------------------------------- CPU
@@ -81,26 +83,65 @@ def _nvml_candidates():
     return ["libnvidia-ml.so.1", "libnvidia-ml.so"]
 
 
-class GpuSampler:
-    """GPU 0 via NVML; .available False when there is no NVIDIA driver."""
-
-    def __init__(self, loader=None):
-        self.lib = None; self.handle = None; self.name = ""
+def _windows_gpu_sample():
+    """Use only the NVIDIA tool installed in a standard Windows driver location."""
+    if sys.platform != "win32":
+        return None
+    system = os.environ.get("SystemRoot", r"C:\Windows")
+    programs = os.environ.get("ProgramFiles", r"C:\Program Files")
+    candidates = (os.path.join(system, "System32", "nvidia-smi.exe"),
+                  os.path.join(programs, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"))
+    executable = next((path for path in candidates if os.path.isfile(path)), None)
+    if not executable:
+        return None
+    from .report import _run
+    output = _run([executable, "-i", "0", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                   "--format=csv,noheader,nounits"], timeout=2)
+    for row in csv.reader(output.splitlines(), skipinitialspace=True):
+        if len(row) != 4:
+            continue
+        name, usage, used, total = (value.strip() for value in row)
         try:
-            self.lib = (loader or self._load)()
-            if self.lib is None:
+            load = float(usage)
+        except ValueError:
+            return name, None
+        if 0 <= load <= 100:
+            return name, (load, int(used) if used.isdecimal() else None,
+                          int(total) if total.isdecimal() else None)
+    return None
+
+
+class GpuSampler:
+    """Read GPU 0; recover a failed NVML handle without restarting the app."""
+
+    def __init__(self, loader=None, fallback=None, retry_interval=GPU_RETRY_INTERVAL):
+        self.lib = None
+        self.handle = None
+        self.name = ""
+        self.source = ""
+        self._loader = loader or self._load
+        self._fallback = fallback if fallback is not None else (_windows_gpu_sample if loader is None else None)
+        self._retry_interval = retry_interval
+        self._retry_at = 0.0
+        self._cached_sample = None
+        self._connect()
+
+    def _connect(self):
+        try:
+            lib = self._loader()
+            if lib is None or lib.nvmlInit_v2() != 0:
                 return
-            if self.lib.nvmlInit_v2() != 0:
-                self.lib = None; return
+            self.lib = lib
             h = ctypes.c_void_p()
             if self.lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(h)) != 0:
-                self.lib = None; return
+                self.close()
+                return
             self.handle = h
             buf = ctypes.create_string_buffer(96)
             if self.lib.nvmlDeviceGetName(h, buf, 96) == 0:
                 self.name = buf.value.decode(errors="replace")
         except Exception:  # noqa: BLE001
-            self.lib = None
+            self.close()
 
     @staticmethod
     def _load():
@@ -118,6 +159,30 @@ class GpuSampler:
         return self.lib is not None and self.handle is not None
 
     def sample(self):
+        """Return a current NVML sample or a throttled driver-tool sample."""
+        result = self._sample_nvml()
+        if result is None:
+            if time.monotonic() < self._retry_at:
+                return self._cached_sample
+            self.close()
+            self._connect()
+            result = self._sample_nvml()
+        if result is not None:
+            self.source = "NVML"
+            self._retry_at = 0.0
+            self._cached_sample = None
+            return result
+        self.close()
+        reading = self._fallback() if self._fallback else None
+        self._retry_at = time.monotonic() + self._retry_interval
+        self._cached_sample = None
+        self.source = ""
+        if reading is not None:
+            self.name, self._cached_sample = reading
+            self.source = "NVIDIA driver tool"
+        return self._cached_sample
+
+    def _sample_nvml(self):
         """(gpu %, used MB, total MB) or None."""
         if not self.available:
             return None
@@ -139,11 +204,12 @@ class GpuSampler:
         except Exception:  # noqa: BLE001
             pass
         self.lib = None
+        self.handle = None
 
 
 # ---------------------------------------------------------------- monitor
 class ResourceMonitor(QObject):
-    """sampled(dict): {"cpu": % or None, "gpu": % or None, "gpu_mem": (used, total) MB, "gpu_name": str}"""
+    """Emit CPU load and GPU load, memory in MB, name, and sampling source."""
     sampled = Signal(object)
 
     def __init__(self, interval=INTERVAL, cpu=None, gpu=None, parent=None):
@@ -171,9 +237,12 @@ class ResourceMonitor(QObject):
         gpu = self._gpu if self._gpu is not None else GpuSampler()   # NVML init off the GUI thread
         try:
             while not self._stop.wait(self.interval):
-                g = gpu.sample() if gpu.available else None
+                g = gpu.sample()
                 self.last = {"cpu": cpu.percent(), "gpu": g[0] if g else None,
-                             "gpu_mem": (g[1], g[2]) if g else None, "gpu_name": gpu.name if gpu.available else ""}
+                             "gpu_mem": (g[1], g[2]) if g else None, "gpu_name": gpu.name,
+                             "gpu_source": getattr(gpu, "source", "")}
+                if self._stop.is_set():
+                    return
                 try:
                     self.sampled.emit(self.last)
                 except RuntimeError:                # receiver deleted at exit

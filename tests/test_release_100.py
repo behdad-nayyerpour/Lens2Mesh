@@ -76,7 +76,7 @@ def test_status_has_no_progress_widgets_and_only_ready_busy(window):
     window.busy_indicator.background("tiles")
     assert window.statusBar().currentMessage() == "Ready"
     window._show_resources({"cpu": 20, "gpu": None})
-    assert window.gpu_label.text() == "GPU unavailable"
+    assert window.gpu_label.text() == "GPU usage unavailable"
 
 
 def test_task_panel_has_two_bars_and_unknown_totals(qtbot):

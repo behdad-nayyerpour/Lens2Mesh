@@ -179,7 +179,7 @@ def test_cpu_sampler_without_psutil(monkeypatch):
 def test_gpu_sampler_nvml_fake_and_missing():
     import ctypes
     from photomesh import statusmon as sm
-    assert not sm.GpuSampler(loader=lambda: None).available          # no NVIDIA driver -> hidden
+    assert not sm.GpuSampler(loader=lambda: None).available
 
     class FakeNvml:
         def nvmlInit_v2(self): return 0
@@ -199,6 +199,48 @@ def test_gpu_sampler_nvml_fake_and_missing():
     class Broken(FakeNvml):
         def nvmlInit_v2(self): return 9                                  # driver/library mismatch
     assert not sm.GpuSampler(loader=Broken).available
+
+
+def test_gpu_sampler_recovers_an_initial_failure_and_lost_handle():
+    import ctypes
+    from photomesh import statusmon as sm
+
+    class Driver:
+        disconnected = False
+        closed = 0
+
+        def nvmlInit_v2(self): return 0
+        def nvmlShutdown(self): self.closed += 1
+        def nvmlDeviceGetHandleByIndex_v2(self, _index, _handle): return 0
+        def nvmlDeviceGetName(self, _handle, name, _length): name.value = b"NVIDIA test GPU"; return 0
+        def nvmlDeviceGetUtilizationRates(self, _handle, usage):
+            ctypes.cast(usage, ctypes.POINTER(sm._Util)).contents.gpu = 0
+            return 15 if self.disconnected else 0
+        def nvmlDeviceGetMemoryInfo(self, _handle, _memory): return 1
+
+    first, second = Driver(), Driver()
+    attempts = iter([None, first, second])
+    sampler = sm.GpuSampler(loader=lambda: next(attempts))
+    assert not sampler.available
+    assert sampler.sample() == (0.0, None, None)
+    first.disconnected = True
+    assert sampler.sample() == (0.0, None, None)
+    assert first.closed == 1 and sampler.lib is second and sampler.source == "NVML"
+    sampler.close()
+    assert second.closed == 1 and not sampler.available
+
+
+def test_gpu_driver_fallback_is_throttled():
+    from photomesh import statusmon as sm
+
+    calls = []
+    def fallback():
+        calls.append(True)
+        return "NVIDIA test GPU", (0.0, 128, 16384)
+    sampler = sm.GpuSampler(loader=lambda: None, fallback=fallback)
+    assert sampler.sample() == sampler.sample() == (0.0, 128, 16384)
+    assert calls == [True]
+    assert sampler.name == "NVIDIA test GPU" and sampler.source == "NVIDIA driver tool"
 
 
 def test_monitor_samples_off_gui_thread_and_updates_status(window, qtbot):
@@ -221,13 +263,12 @@ def test_monitor_samples_off_gui_thread_and_updates_status(window, qtbot):
     qtbot.waitUntil(lambda: len(got) >= 2, timeout=5000)
     mon.stop()
     assert Cpu.thread == "resource-monitor" and got[0]["cpu"] == 42.0 and got[0]["gpu"] is None
-    assert window.cpu_label.text() == "CPU  42%" and window.gpu_label.text() == "GPU unavailable"
+    assert window.cpu_label.text() == "CPU  42%" and window.gpu_label.text() == "GPU usage unavailable"
+    assert "CUDA processing is checked separately." in window.gpu_label.toolTip()
     window._show_resources({"cpu": 5.0, "gpu": 80.0, "gpu_mem": (1024, 4096), "gpu_name": "NVIDIA X"})
     assert window.gpu_label.isVisible() and window.gpu_label.text().startswith("GPU  80%")
-    # the window's own monitor runs in the background (never nvidia-smi)
+    # The window's own monitor stays off the GUI thread.
     assert window.monitor._thread is not None and window.monitor._thread.daemon
-    src = open(sm.__file__, encoding="utf-8").read()
-    assert "subprocess" not in src and "import psutil" in src
 
 
 # ------------------------------------------------------------------ 6 GCP in the ortho view

@@ -559,7 +559,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
     def _start_resource_monitor(self):
         """CPU / GPU load in the status bar; unavailable GPU sampling is shown explicitly."""
         from .statusmon import ResourceMonitor
-        self.cpu_label = QLabel("CPU  --"); self.gpu_label = QLabel("GPU unavailable")
+        self.cpu_label = QLabel("CPU  --"); self.gpu_label = QLabel("GPU usage —")
         for lab in (self.cpu_label, self.gpu_label):
             lab.setToolTip("System load (updated every 1.5 s)")
             self.statusBar().addPermanentWidget(lab)
@@ -572,12 +572,16 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
     def _show_resources(self, d):
         from .statusmon import format_cpu, format_gpu
         self.cpu_label.setText(format_cpu(d.get("cpu")))
+        name = d.get("gpu_name") or "GPU"
         if d.get("gpu") is None:
-            self.gpu_label.setText("GPU unavailable")
+            self.gpu_label.setText("GPU usage unavailable")
+            self.gpu_label.setToolTip(f"{name}: usage could not be read. Retrying automatically. "
+                                      "CUDA processing is checked separately.")
         else:
             self.gpu_label.setText(format_gpu(d["gpu"]))
-            if d.get("gpu_name"):
-                self.gpu_label.setToolTip(f"{d['gpu_name']}: GPU load and memory (NVIDIA NVML)")
+            source = d.get("gpu_source") or "NVIDIA driver"
+            reading = format_gpu(d["gpu"], d.get("gpu_mem"))
+            self.gpu_label.setToolTip(f"{name}: {reading} ({source})")
             self.gpu_label.show()
         tile = self.model_view.tiled_item()
         if tile is not None and tile.pending:
