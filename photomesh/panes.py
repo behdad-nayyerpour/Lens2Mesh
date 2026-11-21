@@ -7,10 +7,10 @@ import io
 import os
 
 from PySide6.QtCore import Qt, Signal, QSize, QItemSelectionModel
-from PySide6.QtGui import QIcon, QPixmap, QColor, QBrush
+from PySide6.QtGui import QIcon, QPixmap, QColor, QBrush, QPalette
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QListWidget,
-    QListWidgetItem, QWidget, QVBoxLayout, QPlainTextEdit, QLineEdit, QMenu,
+    QListWidgetItem, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QPlainTextEdit, QLineEdit, QMenu,
     QHeaderView, QListView, QAbstractItemView)
 
 ROLE = Qt.UserRole
@@ -483,13 +483,14 @@ class MarkersPane(QTableWidget):
     marker's photo. Right-click: Add / Rename / Remove Marker, Filter Photos
     by Markers, Reset Filter. The checkbox makes the marker a control (checked)
     or check (unchecked) point."""
-    COLS = ["Markers", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
-            "Error (m)", "Projections", "Error (pix)"]
+    COLS = ["Point", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
+            "Error (m)", "Pins", "Error (px)", "Role", "Status"]
     EDITABLE = (0, 1, 2, 3, 4)
     markerActivated = Signal(str)
     markerToggled = Signal(str, bool)
     markerEdited = Signal(str, int, str)        # label, column, new text
     markerAction = Signal(str, list)            # menu action, selected labels
+    presentationUpdated = Signal(object, int)
 
     def __init__(self, parent=None):
         super().__init__(0, len(self.COLS), parent)
@@ -498,6 +499,11 @@ class MarkersPane(QTableWidget):
         self.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(True)
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 7)
+        header = self.horizontalHeader()
+        header.moveSection(header.visualIndex(8), 1)
+        for column, width in enumerate((83, 99, 99, 92, 103, 85, 62, 86, 76, 160)):
+            self.setColumnWidth(column, width)
         self._busy = False
         self.pending = {}
         self.itemChanged.connect(self._changed)
@@ -513,9 +519,10 @@ class MarkersPane(QTableWidget):
         self._busy = True
         try:
             with bulk_fill(self):
-                self._fill(dataset)
+                controls_with_pins = self._fill(dataset)
         finally:
             self._busy = False
+        self.presentationUpdated.emit(dataset, controls_with_pins)
 
     def _fill(self, dataset):
         ms = getattr(dataset, "markers", None) or []
@@ -527,19 +534,39 @@ class MarkersPane(QTableWidget):
         selected = set(self.selected_labels())
         self.clearContents()
         self.data_row_count = len(ms)
-        self.setRowCount(len(ms) + 2)
+        self.setRowCount(len(ms))
         self._marker_groups = [bool(m.get("enabled", True)) for m in ms]
         self.error_summary = marker_error_summary(ms, rows)
+        from .georef import _stem
+        aligned = {_stem(c.colmap_name or c.label) for c in dataset.cameras if c.aligned and c.enabled}
+        controls_with_pins = 0
+        dark = self.palette().color(QPalette.Base).lightness() < 128
         for r, m in enumerate(ms):
             pend = (self.pending or {}).get(m["label"])
             ref = pend or m.get("ref") or [None, None, None]
             acc = m.get("acc")
             e = rows.get(m["label"], {})
             proj = m.get("projections", {})
-            pinned = sum(1 for v in proj.values() if len(v) < 3 or v[2])
+            pins = {name for name, value in proj.items() if len(value) < 3 or value[2]}
+            pinned = len(pins)
+            automatic = sum(len(v) > 3 and v[3] == "refined" for v in proj.values())
+            manual_on_aligned = len({_stem(name) for name in pins} & aligned)
+            control = m.get("enabled", True)
+            if m.get("disabled"):
+                status = "Ignored"
+            elif m.get("ref") is None:
+                status = "Needs XYZ"
+            elif automatic and e.get("pix") is None:
+                status = "Review auto placements"
+            elif manual_on_aligned < 2 and e.get("pix") is None:
+                status = "Needs aligned pins"
+            else:
+                status = "Measured" if e.get("pix") is not None else "Pins ready"
+                controls_with_pins += int(control)
             vals = [m["label"], _fmt(ref[0], 4), _fmt(ref[1], 4), _fmt(ref[2], 4),
                     "" if not acc else (f"{acc[0]:.3f}" if acc[0] == acc[1] else f"{acc[0]:.3f}/{acc[1]:.3f}"),
-                    _fmt(e.get("total"), 4), f"{pinned}/{len(proj)}", _fmt(e.get("pix"), 3)]
+                    _fmt(e.get("total"), 4), str(pinned), _fmt(e.get("pix"), 3),
+                    "Control" if control else "Check", status]
             for k, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(ROLE, m["label"])            # label before any edit
@@ -547,42 +574,33 @@ class MarkersPane(QTableWidget):
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 if k == 0:
                     it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                    it.setCheckState(Qt.Checked if m.get("enabled", True) else Qt.Unchecked)
-                    it.setToolTip(("Control point" if m.get("enabled", True) else "Check point") +
-                                  (" - ignored" if m.get("disabled", False) else "") +
-                                  "; checkbox changes Control/Check; double-click to rename")
-                    from .marker_style import flag_icon, marker_state
-                    it.setIcon(flag_icon(marker_state(m)))
+                    it.setCheckState(Qt.Checked if control else Qt.Unchecked)
+                    it.setToolTip("Double-click to rename")
                     if m.get("disabled"):
                         it.setForeground(QBrush(QColor(150, 150, 150)))
-                    it.setData(ROLE + 1, bool(m.get("enabled", True)))
+                    it.setData(ROLE + 1, bool(control))
                 elif k in (1, 2, 3, 4):
                     it.setToolTip("Double-click to edit" + (" (incomplete: enter X, Y and Z)" if pend else ""))
                     if pend:
                         f = it.font(); f.setItalic(True); it.setFont(f)
                         it.setForeground(QBrush(QColor(230, 160, 60)))
                 elif k == 6:
+                    it.setData(ROLE + 3, automatic)
                     it.setToolTip(f"{pinned} pinned / {len(proj)} locations. Gray predictions are display hints; "
                                   "blue refined placements and green pins are image observations.")
+                elif k == 9 and status != "Ignored":
+                    if status in ("Measured", "Pins ready"):
+                        color = "#a8dfb9" if dark else "#246346"
+                    else:
+                        color = "#f0cf92" if dark else "#7d4e12"
+                    it.setForeground(QBrush(QColor(color)))
                 self.setItem(r, k, it)
             if m["label"] in selected:
                 from PySide6.QtCore import QItemSelectionModel
                 self.selectionModel().select(self.model().index(r, 0),
                                              QItemSelectionModel.Select | QItemSelectionModel.Rows)
-        self.summary_rows = {}
-        for offset, group in enumerate(("Control points", "Check points")):
-            index = len(ms) + offset
-            self.summary_rows[group] = index
-            totals = self.error_summary[group]
-            tip = (f"RMSE: {totals['measured']} measured coordinate errors / {totals['count']} points. "
-                   "Pixel RMSE is weighted by observation count; ignored points are excluded.")
-            for column in range(self.columnCount()):
-                self.setItem(index, column, summary_item(tooltip=tip))
-            self.item(index, 0).setText(group)
-            self.item(index, 5).setText(_fmt(totals["error"], 3) if totals["error"] is not None else "—")
-            self.item(index, 7).setText(_fmt(totals["pixel"], 3) if totals["pixel"] is not None else "—")
-            self.setRowHidden(index, False)
         self.filter_group(getattr(self, "_group", 0))
+        return controls_with_pins
 
     def filter_group(self, group):
         if group != getattr(self, "_group", 0):
@@ -665,15 +683,92 @@ def marker_error_summary(markers, rows):
     return summary
 
 
-def markers_panel(table):
+def markers_panel(table, import_points):
     from PySide6.QtWidgets import QTabBar
     panel = QWidget()
-    layout = QVBoxLayout(panel); layout.setContentsMargins(2, 2, 2, 2)
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(4, 4, 4, 4)
+    layout.setSpacing(5)
+    top = QHBoxLayout()
+    top.addStretch()
+    import_button = QPushButton("Import points…")
+    import_button.clicked.connect(lambda: import_points())
+    add_button = QPushButton("Add point")
+    add_button.clicked.connect(lambda: table.markerAction.emit("Add Marker", []))
+    top.addWidget(import_button)
+    top.addWidget(add_button)
+    layout.addLayout(top)
+    coordinate_row = QHBoxLayout()
+    coordinate = QLabel("Not set")
+    coordinate.setWordWrap(True)
+    change = QPushButton("Change…")
+    change.setEnabled(False)
+    coordinate_row.addWidget(coordinate, 1)
+    coordinate_row.addWidget(change)
+    readiness = QLabel()
+    layout.addWidget(QLabel("Control coordinates"))
+    layout.addLayout(coordinate_row)
+    layout.addWidget(readiness)
     groups = QTabBar()
     for text in ("All points", "Control points", "Check points"):
         groups.addTab(text)
     groups.currentChanged.connect(table.filter_group)
     layout.addWidget(groups); layout.addWidget(table, 1)
+
+    layout.addWidget(QLabel("Error summary (RMSE)"))
+    summary = table.summary_table = QTableWidget(2, 3)
+    summary.setHorizontalHeaderLabels(["Point group", "Error (m)", "Error (px)"])
+    summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    summary.verticalHeader().hide()
+    row_height = table.fontMetrics().height() + 7
+    summary.verticalHeader().setDefaultSectionSize(row_height)
+    summary.setFixedHeight(summary.horizontalHeader().sizeHint().height() + 2 * row_height + 4)
+    summary.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    summary.setAlternatingRowColors(True)
+    layout.addWidget(summary)
+
+    details = QLabel()
+    details.setWordWrap(True)
+    layout.addWidget(details)
+    actions = QHBoxLayout()
+    open_photos = QPushButton("Open photos")
+    open_photos.clicked.connect(lambda: table.markerAction.emit("Filter Photos by Markers", table.selected_labels()))
+    clear_auto = QPushButton("Clear auto placements")
+    clear_auto.setEnabled(False)
+    actions.addWidget(open_photos)
+    actions.addWidget(clear_auto)
+    layout.addLayout(actions)
+
+    def update_details():
+        labels = table.selected_labels()
+        item = table.item(table.currentRow(), 6)
+        if len(labels) != 1 or item is None or item.data(ROLE) != labels[0]:
+            details.setText("Select a point to see its placements.")
+        else:
+            details.setText(f"{labels[0]} · {item.text()} manual pins · {item.data(ROLE + 3)} automatic placements")
+        open_photos.setEnabled(bool(labels))
+
+    def update_panel(dataset, ready_count):
+        reference = dataset.crs or (dataset.georef or {}).get("crs")
+        if reference:
+            from .georef import CRS
+            try:
+                reference = CRS.parse(reference).name
+            except ValueError:
+                pass
+        coordinate.setText(reference or "Not set")
+        readiness.setText(f"Controls with enough placements: {ready_count}")
+        for index, group in enumerate(("Control points", "Check points")):
+            totals = table.error_summary[group]
+            summary.setItem(index, 0, summary_item(group))
+            for column, key in enumerate(("error", "pixel"), 1):
+                summary.setItem(index, column, summary_item(_fmt(totals[key], 3) or "—"))
+        update_details()
+
+    table.itemSelectionChanged.connect(update_details)
+    table.currentCellChanged.connect(update_details)
+    table.presentationUpdated.connect(update_panel)
+    update_details()
     return panel
 
 

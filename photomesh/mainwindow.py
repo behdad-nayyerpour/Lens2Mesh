@@ -206,7 +206,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.setCorner(Qt.BottomRightCorner, R)
         self.docks = {
             "Project": self._dock("Project", self._workspace_panel(), L, "project"),
-            "Markers": self._dock("Markers", markers_panel(self.markers_pane), L, "markers"),
+            "Markers": self._dock("Ground Control Point",
+                                  markers_panel(self.markers_pane, self._safe("Import Markers", self.import_markers)),
+                                  L, "markers"),
             "Cameras": self._dock("Cameras", self.reference, L, "cameras"),
             "Photos": self._dock("Photos", photos_panel, R, "photos"),
             "Console": self._dock("Console", self.console, B, "console"),
