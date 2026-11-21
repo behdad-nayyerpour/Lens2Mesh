@@ -480,11 +480,11 @@ class MarkersPane(QTableWidget):
 
     Double-click a Markers / X / Y / Z / Accuracy cell to edit it (validated by
     the main window; Edit > Undo reverts). Double-click another cell opens the
-    marker's photo. Right-click: Add / Rename / Remove Marker, Filter Photos
-    by Markers, Reset Filter. The checkbox makes the marker a control (checked)
-    or check (unchecked) point."""
+    marker's photo. Right-click: Add / Rename / Remove Marker. The checkbox
+    makes the marker a control (checked) or check (unchecked) point."""
     COLS = ["Point", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
-            "Error (m)", "Pins", "Error (px)", "Role", "Status"]
+            "Error (m)", "Pins", "Error (px)", "Role", "Status", "Auto"]
+    MIN_WIDTHS = (84, 101, 101, 94, 105, 84, 68, 90, 77, 167, 70)
     EDITABLE = (0, 1, 2, 3, 4)
     markerActivated = Signal(str)
     markerToggled = Signal(str, bool)
@@ -502,7 +502,9 @@ class MarkersPane(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 7)
         header = self.horizontalHeader()
         header.moveSection(header.visualIndex(8), 1)
-        for column, width in enumerate((83, 99, 99, 92, 103, 85, 62, 86, 76, 160)):
+        header.moveSection(header.visualIndex(6), header.visualIndex(7))
+        header.moveSection(header.visualIndex(10), header.visualIndex(6) + 1)
+        for column, width in enumerate(self.MIN_WIDTHS):
             self.setColumnWidth(column, width)
         self._busy = False
         self.pending = {}
@@ -520,6 +522,8 @@ class MarkersPane(QTableWidget):
         try:
             with bulk_fill(self):
                 controls_with_pins = self._fill(dataset)
+            for column, width in enumerate(self.MIN_WIDTHS):
+                self.setColumnWidth(column, max(width, self.columnWidth(column) + 14))
         finally:
             self._busy = False
         self.presentationUpdated.emit(dataset, controls_with_pins)
@@ -549,7 +553,8 @@ class MarkersPane(QTableWidget):
             proj = m.get("projections", {})
             pins = {name for name, value in proj.items() if len(value) < 3 or value[2]}
             pinned = len(pins)
-            automatic = sum(len(v) > 3 and v[3] == "refined" for v in proj.values())
+            automatic = sum(len(v) > 3 and not v[2] and v[3] == "refined" for v in proj.values())
+            predicted = sum(len(v) > 3 and not v[2] and v[3] == "predicted" for v in proj.values())
             manual_on_aligned = len({_stem(name) for name in pins} & aligned)
             control = m.get("enabled", True)
             if m.get("disabled"):
@@ -566,7 +571,7 @@ class MarkersPane(QTableWidget):
             vals = [m["label"], _fmt(ref[0], 4), _fmt(ref[1], 4), _fmt(ref[2], 4),
                     "" if not acc else (f"{acc[0]:.3f}" if acc[0] == acc[1] else f"{acc[0]:.3f}/{acc[1]:.3f}"),
                     _fmt(e.get("total"), 4), str(pinned), _fmt(e.get("pix"), 3),
-                    "Control" if control else "Check", status]
+                    "Control" if control else "Check", status, str(automatic)]
             for k, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(ROLE, m["label"])            # label before any edit
@@ -583,17 +588,22 @@ class MarkersPane(QTableWidget):
                     it.setToolTip("Double-click to edit" + (" (incomplete: enter X, Y and Z)" if pend else ""))
                     if pend:
                         f = it.font(); f.setItalic(True); it.setFont(f)
-                        it.setForeground(QBrush(QColor(230, 160, 60)))
+                        it.setForeground(QBrush(QColor("#f0cf92" if dark else "#633e00")))
                 elif k == 6:
-                    it.setData(ROLE + 3, automatic)
-                    it.setToolTip(f"{pinned} pinned / {len(proj)} locations. Gray predictions are display hints; "
-                                  "blue refined placements and green pins are image observations.")
+                    it.setData(ROLE + 3, predicted)
+                    it.setToolTip(f"{pinned} manual pins · {predicted} unconfirmed predictions")
+                elif k == 10:
+                    it.setToolTip("Automatic placements confirmed by image refinement. "
+                                  "Unconfirmed predictions are shown in the point details.")
                 elif k == 9 and status != "Ignored":
                     if status in ("Measured", "Pins ready"):
-                        color = "#a8dfb9" if dark else "#246346"
+                        color = "#a8dfb9" if dark else "#155032"
                     else:
-                        color = "#f0cf92" if dark else "#7d4e12"
+                        color = "#f0cf92" if dark else "#633e00"
                     it.setForeground(QBrush(QColor(color)))
+                    font = it.font()
+                    font.setBold(True)
+                    it.setFont(font)
                 self.setItem(r, k, it)
             if m["label"] in selected:
                 from PySide6.QtCore import QItemSelectionModel
@@ -647,12 +657,9 @@ class MarkersPane(QTableWidget):
         labels = self.selected_labels()
         m = QMenu(self)
         m.addAction("Add Marker")
-        for name in ("Rename Marker...", "Remove Markers", "-", "Show Marker", "Filter Photos by Markers",
-                     "Reset Filter"):
-            if name == "-":
-                m.addSeparator(); continue
+        for name in ("Rename Marker...", "Remove Markers"):
             a = m.addAction(name)
-            a.setEnabled(bool(labels) or name == "Reset Filter")
+            a.setEnabled(bool(labels))
         a = m.exec(self.viewport().mapToGlobal(pos))
         if a:
             self.markerAction.emit(a.text(), labels)
@@ -733,20 +740,26 @@ def markers_panel(table, import_points):
     actions = QHBoxLayout()
     open_photos = QPushButton("Open photos")
     open_photos.clicked.connect(lambda: table.markerAction.emit("Filter Photos by Markers", table.selected_labels()))
+    all_photos = QPushButton("All photos")
+    all_photos.clicked.connect(lambda: table.markerAction.emit("Reset Filter", []))
     clear_auto = QPushButton("Clear auto placements")
     clear_auto.setEnabled(False)
     actions.addWidget(open_photos)
+    actions.addWidget(all_photos)
     actions.addWidget(clear_auto)
     layout.addLayout(actions)
 
     def update_details():
-        labels = table.selected_labels()
-        item = table.item(table.currentRow(), 6)
-        if len(labels) != 1 or item is None or item.data(ROLE) != labels[0]:
+        rows = table.selectionModel().selectedRows(0)
+        if len(rows) != 1:
             details.setText("Select a point to see its placements.")
         else:
-            details.setText(f"{labels[0]} · {item.text()} manual pins · {item.data(ROLE + 3)} automatic placements")
-        open_photos.setEnabled(bool(labels))
+            row = rows[0].row()
+            pins = table.item(row, 6)
+            auto = table.item(row, 10)
+            details.setText(f"{pins.data(ROLE)} · Manual pins: {pins.text()} · "
+                            f"Auto placements: {auto.text()} · Predictions: {pins.data(ROLE + 3)}")
+        open_photos.setEnabled(bool(rows))
 
     def update_panel(dataset, ready_count):
         reference = dataset.crs or (dataset.georef or {}).get("crs")

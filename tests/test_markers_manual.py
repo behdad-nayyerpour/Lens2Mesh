@@ -55,6 +55,41 @@ def _marker(window, label):
     return next(m for m in window.dataset.markers if m["label"] == label)
 
 
+def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel, QMenu, QPushButton
+
+    ch = _scene(window, tmp_path)
+    ch.markers = [g.Marker("P12", [100, 100, 0], projections={
+        "img_0001": [500, 400, True],
+        "img_0002": [510, 400, False, "refined"],
+        "other": [520, 400, False, "predicted"],
+    }).to_dict()]
+    ch.georef = {"rows": [{"label": "P12", "pix": 0.5}]}
+    pane = window.markers_pane
+    pane.refresh(ch)
+    header = pane.horizontalHeader()
+    assert header.visualIndex(6) == header.visualIndex(7) + 1
+    assert header.visualIndex(10) == header.visualIndex(6) + 1
+    assert pane.columnWidth(1) >= 101
+    assert pane.item(0, 9).text() == "Measured"
+    assert pane.item(0, 10).text() == "1"
+
+    pane.selectRow(0)
+    panel = window.docks["Markers"].widget()
+    assert any("Auto placements: 1 · Predictions: 1" in label.text() for label in panel.findChildren(QLabel))
+    buttons = {button.text(): button for button in panel.findChildren(QPushButton)}
+    buttons["Open photos"].click()
+    assert window.photos.visible_indices() == [0, 1]
+    buttons["All photos"].click()
+    assert window.photos.visible_indices() == [0, 1, 2]
+
+    menu_actions = []
+    monkeypatch.setattr(QMenu, "exec", lambda menu, _pos: menu_actions.extend(a.text() for a in menu.actions()))
+    pane._menu(QPoint(0, 0))
+    assert menu_actions == ["Add Marker", "Rename Marker...", "Remove Markers"]
+
+
 def test_add_marker_on_photo_pins_and_predicts_other_photos(window, tmp_path):
     ch = _scene(window, tmp_path)
     ch.model_ply = _ground_ply(str(tmp_path / "ground.ply"))
