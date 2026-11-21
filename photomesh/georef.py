@@ -257,7 +257,7 @@ HEADER_KEYS = {
 }
 
 
-def read_reference_text(path):
+def read_reference_text(path, default_crs=None):
     """Marker coordinates from a text/CSV file. Returns (markers, CRS).
 
     Handles Metashape Reference exports (tab separated, '# CoordinateSystem:'
@@ -308,7 +308,8 @@ def read_reference_text(path):
         if "enabled" in col and col["enabled"] < len(r):
             m.enabled = r[col["enabled"]].strip().lower() not in ("0", "false", "no", "check")
         markers.append(m)
-    crs = CRS.parse(crs_text) if crs_text else _guess_crs(markers)
+    fallback = crs_text or default_crs
+    crs = CRS.parse(fallback) if fallback else _guess_crs(markers)
     return markers, crs
 
 
@@ -432,11 +433,11 @@ def read_projections_csv(path, markers):
     return [m for m in by.values()], n
 
 
-def import_markers(path):
+def import_markers(path, default_crs=None):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".xml":
         return read_markers_xml(path)
-    return read_reference_text(path)
+    return read_reference_text(path, default_crs)
 
 
 def merge_markers(existing, new):
@@ -1338,10 +1339,11 @@ def run_task(cfg, log=print):
     compare_heights = not (frame and marker_heights != 'ellipsoidal')
     if cfg.get('strict_heights') and not control and markers:
         compare_heights = marker_heights == model_heights and marker_heights != 'unknown'
+    compare_xyz = compare_heights and cfg.get("compare_marker_xyz", True)
     est, pix, cnt, rows = marker_diagnostics(model, markers, crs, offset, zone_hint, frame=frame,
-                                          compare_heights=compare_heights)
-    if not compare_heights and markers:
-        log('GCP XYZ residuals unavailable: GCP and model height references are not confirmed compatible. Image residuals remain independent.')
+                                          compare_heights=compare_xyz)
+    if not compare_xyz and markers:
+        log('GCP XYZ residuals unavailable: the GCP and model coordinate or height references do not match. Image residuals remain available.')
     # ---- commit transactionally: build every output in temporary files first,
     # so a failure leaves the model AND the point cloud / mesh in the old frame
     M = sim_matrix(s, R, t)
@@ -1377,7 +1379,9 @@ def run_task(cfg, log=print):
                 f"Z {q['z']:.4f}  XY {q['xy']:.4f}  total {q['total']:.4f} m")
     if cfg.get("report"):
         write_report(cfg["report"], rows, crs, pix, cnt)
-    out = {"offset": offset.tolist(), "similarity": M.tolist(), "crs": crs.name, "crs_kind": crs.kind,
+    declared = cfg.get("crs") or ""
+    serialized_crs = declared if crs.kind == "local" and declared.lstrip().upper().startswith("LOCAL_CS[") else crs.name
+    out = {"offset": offset.tolist(), "similarity": M.tolist(), "crs": serialized_crs, "crs_kind": crs.kind,
            "coordinate_frame": frame, "height_reference": model_heights,
            "camera_height_reference": camera_heights, "marker_height_reference": marker_heights,
            "reference_heights_verified": compare_heights,

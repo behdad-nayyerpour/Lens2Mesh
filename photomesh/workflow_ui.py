@@ -45,7 +45,7 @@ def alignment_context(d, parent):
             kind = "Global if supported; otherwise Incremental" if len(cameras) >= 100 else "Incremental"
         text = f"{len(cameras)} photos; solver: {kind}. "
         text += f"Two stages: up to 1024 px / {side} px." if fine else f"One stage: {side or 'unknown'} px."
-        if mode == "Fast" and d.c2f.isChecked() and side and not fine:
+        if d.c2f.isEnabled() and d.c2f.isChecked() and side and not fine:
             text += " Target resolution does not require a second stage."
         if d.feature_method.currentText() == "ALIKED + LightGlue":
             text += " ALIKED uses at most 2048 px and one extraction worker to bound ONNX memory."
@@ -58,6 +58,9 @@ def alignment_context(d, parent):
     d.c2f.toggled.connect(update)
     d.feature_method.currentTextChanged.connect(update)
     button = QPushButton("Review calibration groups...")
+    button.setToolTip("Review or override the shared calibration groups used for alignment.")
+    button.setEnabled(d.single_camera.isChecked())
+    d.single_camera.toggled.connect(button.setEnabled)
     d.aform.addRow(button)
     d.calibration_groups = {}
     def groups():

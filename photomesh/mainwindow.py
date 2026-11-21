@@ -207,7 +207,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.docks = {
             "Project": self._dock("Project", self._workspace_panel(), L, "project"),
             "Markers": self._dock("Ground Control Point",
-                                  markers_panel(self.markers_pane, self._safe("Import GCPs", self.import_markers)),
+                                  markers_panel(self.markers_pane, self._safe("Import GCPs", self.import_markers),
+                                                self._safe("GCP coordinate system", self.change_gcp_coordinates)),
                                   L, "markers"),
             "Cameras": self._dock("Cameras", cameras_panel(self.reference), L, "cameras"),
             "Photos": self._dock("Photos", photos_panel, R, "photos"),
@@ -1785,7 +1786,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         if not exe:
             return
         from . import alignment_resume
-        from .alignment_reference import GEOREF_FIELDS, alignment_reference_config
+        from .alignment_reference import GEOREF_FIELDS, alignment_reference_config, gcp_crs
         self._photo_map(ch)  # recover legacy identities before checking observations
         saved=alignment_resume.pending(self.project.data_dir,ch)
         if saved:
@@ -1888,9 +1889,14 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             resume_record['phase'] = 'complete'
             alignment_resume.save(os.path.join(wd, 'alignment-resume.json'), resume_record)
             ch.workdir = wd
-            ch.reference_settings['reported_gps_accuracy'] = s.get('reported_gps_accuracy', False)
+            if reference_cfg and reference_cfg["use_cameras"] and reference_cfg["bundle"]:
+                ch.reference_settings['reported_gps_accuracy'] = s.get('reported_gps_accuracy', False)
             self._invalidate_camera_products(ch)
             if result:
+                if s.get("use_gcps"):
+                    ch.reference_settings["gcp_crs"] = s.get("gcp_crs") or gcp_crs(ch)
+                elif ch.markers:
+                    ch.reference_settings.setdefault("gcp_crs", gcp_crs(ch))
                 ch.georef = {key: result.get(key) for key in GEOREF_FIELDS}
                 ch.crs = result["crs"]
                 if s.get("gps_frame") and s.get("use_gcps"):

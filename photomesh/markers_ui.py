@@ -112,30 +112,42 @@ class MarkerEditMixin:
             view.cancel_marker_move()
 
     def _markers_snapshot(self):
-        self._mk_undo.append((copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending)))
+        self._mk_undo.append(self._marker_history_state())
         del self._mk_undo[:-UNDO_DEPTH]
         self._mk_redo.clear()
 
+    def _marker_history_state(self):
+        from .alignment_reference import gcp_crs
+        return (copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending),
+                gcp_crs(self.dataset), "gcp_crs" in self.dataset.reference_settings)
+
     def _restore_markers(self, state):
-        restored = [g.Marker(**marker) for marker in copy.deepcopy(state[0])]
+        from .alignment_reference import model_crs
+        records, pending, crs, explicit = state
+        if not explicit and g.CRS.parse(crs) == g.CRS.parse(model_crs(self.dataset)):
+            self.dataset.reference_settings.pop("gcp_crs", None)
+        else:
+            self.dataset.reference_settings["gcp_crs"] = crs
+        restored = [g.Marker(**marker) for marker in records]
         self._invalidate_marker_error_rows(restored)
         self.dataset.markers = [marker.to_dict() for marker in restored]
-        self._ref_pending = copy.deepcopy(state[1])
+        self._ref_pending = pending
         self.set_modified()
-        self._refresh_markers_pane()
         self._update_view_markers()
+        if self._photo_filter:
+            self.filter_photos_by_markers(self._photo_filter[0])
 
     def undo_markers(self):
         if not self._mk_undo:
             self.statusBar().showMessage("Nothing to undo", 3000); return False
-        self._mk_redo.append((copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending)))
+        self._mk_redo.append(self._marker_history_state())
         self._restore_markers(self._mk_undo.pop())
         self.log("Undo: GCPs restored"); return True
 
     def redo_markers(self):
         if not self._mk_redo:
             self.statusBar().showMessage("Nothing to redo", 3000); return False
-        self._mk_undo.append((copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending)))
+        self._mk_undo.append(self._marker_history_state())
         self._restore_markers(self._mk_redo.pop())
         self.log("Redo: GCPs restored"); return True
 
@@ -499,9 +511,8 @@ class MarkerEditMixin:
                 if cur[col - 1] == v:
                     return True
                 cur[col - 1] = v
-                crs_text = (self.dataset.georef or {}).get("crs") or self.dataset.crs
-                crs = g.CRS.parse(crs_text) if crs_text else None
-                if v is not None and crs is not None and getattr(crs, "kind", "") == "wgs84":
+                from .alignment_reference import gcp_crs
+                if v is not None and g.CRS.parse(gcp_crs(self.dataset)).kind == "wgs84":
                     if col == 1 and abs(v) > 180.:
                         raise ValueError("longitude must be within ±180°")
                     if col == 2 and not -80. <= v <= 84.:

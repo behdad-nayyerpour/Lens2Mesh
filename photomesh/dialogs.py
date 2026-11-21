@@ -63,6 +63,58 @@ class _SettingsDialog(QDialog):
         super().accept()
 
 
+class GcpCoordinatesDialog(QDialog):
+    def __init__(self, current, parent=None):
+        super().__init__(parent)
+        from .georef import CRS
+
+        self.setWindowTitle("GCP coordinate system")
+        layout = QFormLayout(self)
+        explanation = QLabel("Choose the system of the XYZ values you entered or surveyed. "
+                             "This assigns a reference to those values. Apply it to the model with Align Photos or Optimize Cameras.")
+        explanation.setWordWrap(True)
+        layout.addRow(explanation)
+        self.system = QComboBox()
+        self.system.addItem(f"Current: {CRS.parse(current).name}", current)
+        self.system.addItem("Local survey grid (XYZ in metres)", "LOCAL")
+        self.system.addItem("WGS 84 (longitude / latitude)", "EPSG:4326")
+        self.system.addItem("Projected CRS by EPSG code", None)
+        self.code = QLineEdit()
+        self.code.setPlaceholderText("e.g. EPSG:32638")
+        self.system.currentIndexChanged.connect(lambda: self.code.setEnabled(self.system.currentData() is None))
+        self.code.setEnabled(False)
+        layout.addRow("Coordinate system:", self.system)
+        layout.addRow("EPSG code:", self.code)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setMinimumWidth(450)
+
+    def selected_crs(self):
+        import re
+        from .georef import CRS
+
+        selected = self.system.currentData()
+        if selected is not None:
+            return selected
+        match = re.fullmatch(r"(?:EPSG:\s*)?(\d{4,5})", self.code.text().strip(), re.IGNORECASE)
+        if not match:
+            raise ValueError("Enter a valid EPSG code, for example EPSG:32638.")
+        selected = f"EPSG:{match[1]}"
+        if CRS.parse(selected).kind not in ("utm", "proj"):
+            raise ValueError("Choose a projected EPSG system with metre units, or select WGS 84 above.")
+        return selected
+
+    def accept(self):
+        try:
+            self.selected_crs()
+        except ValueError as error:
+            QMessageBox.warning(self, self.windowTitle(), str(error))
+            return
+        super().accept()
+
+
 class AlignPhotosDialog(_SettingsDialog):
     def __init__(self, parent=None):
         super().__init__("Align Photos", parent)
@@ -105,23 +157,25 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_frame = QCheckBox("Use photo GPS to locate, scale and orient the model")
         cameras = getattr(dataset, "cameras", [])
         from .engine import gps_frame_available
-        from .alignment_reference import HEIGHT_REFERENCES, control_availability
+        from .alignment_reference import HEIGHT_REFERENCES, control_availability, gcp_crs, model_crs
+        from .georef import CRS
         existing = bool(dataset and (dataset.georef or dataset.aligned_count()))
-        ready, reason = gps_frame_available(cameras, getattr(dataset, "crs", ""), respect_legacy_flags=False)
+        project_crs = model_crs(dataset) if dataset is not None else ""
+        ready, reason = gps_frame_available(cameras, project_crs, respect_legacy_flags=False)
+        self._gps_frame_tooltip = reason if self.photo_gps_on else "Photo GPS is disabled in Settings."
         self.gps_frame.setChecked(ready and self.photo_gps_on and not existing)
         self.gps_frame.setEnabled(ready and self.photo_gps_on)
-        self.gps_frame.setToolTip(reason if self.photo_gps_on else "Photo GPS is disabled in Settings.")
+        self.gps_frame.setToolTip(self._gps_frame_tooltip)
         self.gform.addRow(self.gps_frame)
         self.use_gcps = QCheckBox("Use ground control points to locate, scale and orient the model")
         gcp_ready, gcp_reason = control_availability(dataset)
         self.gcp_coordinates = QComboBox()
-        project_crs = getattr(dataset, "crs", "")
-        current_crs = f"Current ({project_crs or 'local XYZ in metres'})" if len(project_crs) < 60 else "Current project CRS"
-        self.gcp_coordinates.addItem(current_crs, None)
-        alternate_crs = "LOCAL" if project_crs else "EPSG:4326"
+        declared = gcp_crs(dataset) if dataset is not None else "LOCAL"
+        self.gcp_coordinates.addItem(f"Declared ({CRS.parse(declared).name})", declared)
+        alternate_crs = "LOCAL" if CRS.parse(declared).kind != "local" else "EPSG:4326"
         alternate_ready, alternate_reason = control_availability(dataset, alternate_crs)
         if alternate_ready and alternate_reason != gcp_reason:
-            self.gcp_coordinates.addItem("Local survey grid (XYZ in metres)" if project_crs else "WGS84 longitude / latitude",
+            self.gcp_coordinates.addItem("Local survey grid (XYZ in metres)" if alternate_crs == "LOCAL" else "WGS84 longitude / latitude",
                                          alternate_crs)
             if not gcp_ready:
                 gcp_reason += f" Select the applicable GCP coordinate system. {alternate_reason}"
@@ -144,16 +198,28 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_priors = QCheckBox("Also constrain individual camera positions with GPS")
         self.gps_priors.setToolTip("Optional with GPS alone. When GPS and GCPs are selected, the adjustment uses both.")
         def update_reference_controls():
-            combined = self.gps_frame.isChecked() and self.use_gcps.isChecked()
+            selected_crs = self.gcp_coordinates.currentData()
+            using_gcps = self.use_gcps.isEnabled() and self.use_gcps.isChecked()
+            local = using_gcps and CRS.parse(selected_crs).kind == "local"
+            if using_gcps:
+                gps_ready, tooltip = gps_frame_available(cameras, selected_crs, respect_legacy_flags=False)
+            else:
+                gps_ready, tooltip = ready, self._gps_frame_tooltip
+            self.gps_frame.setEnabled(self.photo_gps_on and gps_ready)
+            self.gps_frame.setToolTip(tooltip if self.photo_gps_on else self._gps_frame_tooltip)
+            combined = self.gps_frame.isEnabled() and self.gps_frame.isChecked() and using_gcps
             show_coordinates = self.use_gcps.isChecked() and self.gcp_coordinates.count() > 1
             coordinates_label.setVisible(show_coordinates)
             self.gcp_coordinates.setVisible(show_coordinates)
             height_label.setVisible(combined)
             self.common_heights.setVisible(combined)
-            self.gps_priors.setEnabled(self.gps_frame.isChecked() and not self.use_gcps.isChecked())
+            self.gps_priors.setEnabled(self.gps_frame.isEnabled() and self.gps_frame.isChecked() and not using_gcps)
+            self.reported_accuracy.setEnabled(self.photo_gps_on and not local and
+                                              (combined or (self.gps_priors.isEnabled() and self.gps_priors.isChecked())))
         self.gps_frame.toggled.connect(update_reference_controls)
         self.use_gcps.toggled.connect(update_reference_controls)
-        update_reference_controls()
+        self.gcp_coordinates.currentIndexChanged.connect(update_reference_controls)
+        self.gps_priors.toggled.connect(update_reference_controls)
         self.gform.addRow(self.gps_priors)
         self.gform.addRow("Image resolution:", self.accuracy)
         self.gform.addRow(self.c2f)
@@ -176,6 +242,7 @@ class AlignPhotosDialog(_SettingsDialog):
         self.reported_accuracy.setChecked(bool(getattr(parent, 'dataset', None) and parent.dataset.reference_settings.get('reported_gps_accuracy', False)))
         self.reported_accuracy.setToolTip('Opt-in DJI XMP receiver deviations. Missing/invalid values use the project accuracy; RTK status alone is never an accuracy guarantee.')
         self.aform.addRow(self.reported_accuracy)
+        update_reference_controls()
         self.aform.addRow("Key point limit:", self.key_limit)
         for w in (self.guided, self.single_camera):
             self.aform.addRow(w)
@@ -229,7 +296,7 @@ class AlignPhotosDialog(_SettingsDialog):
                 "gcp_crs": self.gcp_coordinates.currentData() if gcps else None,
                 "common_height_reference": self.common_heights.currentData() if gps and gcps else None,
                 "gps_priors": self.gps_priors.isEnabled() and self.gps_priors.isChecked(),
-                "reported_gps_accuracy": self.reported_accuracy.isChecked(),
+                "reported_gps_accuracy": self.reported_accuracy.isEnabled() and self.reported_accuracy.isChecked(),
                 "coarse_to_fine": self.c2f.isEnabled() and self.c2f.isChecked(),
                 "reference": self.reference.isEnabled() and self.reference.isChecked(),
                 "key_point_limit": self.key_limit.value(),
@@ -435,8 +502,13 @@ class OptimizeCamerasDialog(_SettingsDialog):
         for w in (self.use_markers, self.use_cameras, self.bundle, self.intr):
             self.gform.addRow(w)
         self.control_coordinates = QComboBox()
-        project_crs = getattr(dataset, "crs", "") or "Local"
-        current_label = f"Current project reference ({project_crs})" if len(project_crs) < 60 else "Current project reference"
+        from .alignment_reference import gcp_crs, model_crs
+        from .georef import CRS
+        declared = gcp_crs(dataset) if dataset is not None else "LOCAL"
+        self._model_is_local = dataset is None or CRS.parse(model_crs(dataset)).kind == "local"
+        self._declared_local = (CRS.parse(declared).kind == "local" and dataset is not None
+                                and any(point.get("ref") is not None for point in dataset.markers))
+        current_label = f"Declared GCP reference ({CRS.parse(declared).name})"
         self.control_coordinates.addItem(current_label, "current")
         self.control_coordinates.addItem("Local survey grid (XYZ in metres)", "local")
         self.control_coordinates.setToolTip(
@@ -489,28 +561,35 @@ class OptimizeCamerasDialog(_SettingsDialog):
         self.aform.addRow(note)
         self.use_markers.toggled.connect(self._update_control_coordinates)
         self.control_coordinates.currentIndexChanged.connect(self._update_control_coordinates)
+        self.bundle.toggled.connect(self._update_control_coordinates)
+        self.use_cameras.toggled.connect(self._update_control_coordinates)
         self._update_control_coordinates()
 
     def _local_controls(self):
-        return self.use_markers.isChecked() and self.control_coordinates.currentData() == "local"
+        return self.use_markers.isChecked() and (self._declared_local or self.control_coordinates.currentData() == "local")
 
     def _update_control_coordinates(self):
         local = self._local_controls()
         self.control_coordinates.setEnabled(self.use_markers.isChecked())
         self.local_control_note.setVisible(local)
         self.use_cameras.setEnabled(self._photo_gps_enabled and not local)
-        self.reported_accuracy.setEnabled(self._photo_gps_enabled and not local)
+        self.reported_accuracy.setEnabled(self.use_cameras.isEnabled() and self.use_cameras.isChecked() and self.bundle.isChecked())
         self.adjustment_frame.setEnabled(not local)
+        self.intr.setEnabled(self.bundle.isChecked())
+        self.intrinsic_preset.setEnabled(self.intr.isEnabled() and self.intr.isChecked())
+        self.ties.setEnabled(self.bundle.isChecked())
 
     def settings(self):
         local = self._local_controls()
-        return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isChecked() and not local,
-                "local_control_grid": local,
-                "bundle": self.bundle.isChecked(), "fit_intrinsics": self.intr.isChecked(),
+        override = self.use_markers.isChecked() and self.control_coordinates.currentData() == "local"
+        return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isEnabled() and self.use_cameras.isChecked(),
+                "local_control_grid": override or (local and not self._model_is_local),
+                "use_local_override": override,
+                "bundle": self.bundle.isChecked(), "fit_intrinsics": self.intr.isEnabled() and self.intr.isChecked(),
                 "tie_points": self.ties.value(),
                 "adjustment_frame": "projected" if local else self.adjustment_frame.currentData(),
                 "intrinsics": 'all' if self.intrinsic_preset.currentText() == 'All supported coefficients' else self.intrinsic_preset.currentText(),
-                "reported_gps_accuracy": self.reported_accuracy.isChecked() and self.use_cameras.isChecked(),
+                "reported_gps_accuracy": self.reported_accuracy.isEnabled() and self.reported_accuracy.isChecked() and self.use_cameras.isChecked(),
                 "camera_height_reference": self.height_references['camera'].currentData(),
                 "marker_height_reference": self.height_references['marker'].currentData(),
                 "accuracies": {"camera_accuracy": self.cam_acc.value(), "camera_accuracy_z": self.cam_acc_z.value(),

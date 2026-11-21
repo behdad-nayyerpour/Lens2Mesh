@@ -131,3 +131,77 @@ def test_alignment_reference_failure_cannot_fall_back_to_gps(window, tmp_path):
         g.run_task(cfg)
     assert path.read_bytes() == previous
     assert not Path(cfg["result"]).exists()
+
+
+def test_change_gcp_system_updates_validation_diagnostics_and_processing(window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel, QPushButton
+    from photomesh.alignment_reference import gcp_crs
+    from photomesh.dialogs import GcpCoordinatesDialog, OptimizeCamerasDialog
+    from photomesh.project import Project
+    from test_markers_manual import _scene
+
+    ch = _scene(window, tmp_path)
+    ch.crs = "EPSG:4326"
+    ch.georef = {"crs": ch.crs, "offset": [450000, 4420000, 100],
+                 "rows": [{"label": "P", "total": 1.0}], "control_rmse": {"total": 1.0}}
+    model = window._sparse_model()
+    for index, location in enumerate(((102, 95, 0), (118, 105, 0), (130, 91, 3))):
+        observations = {}
+        for image_id, image in model.images.items():
+            uv = g.predict_projection(model, image_id, location)
+            if uv:
+                observations[image.name] = [*uv, True]
+        ref = [44 + index * .001, 40 + index % 2 * .002, 100.0]
+        ch.markers.append(g.Marker(f"P{index}", ref, projections=observations).to_dict())
+    original_pose = list(ch.cameras[0].est)
+    window.refresh_all()
+
+    def choose_local(dialog):
+        dialog.system.setCurrentIndex(dialog.system.findData("LOCAL"))
+        return True
+
+    monkeypatch.setattr(GcpCoordinatesDialog, "exec", choose_local)
+    panel = window.docks["Markers"].widget()
+    change = next(button for button in panel.findChildren(QPushButton) if button.text() == "Change…")
+    assert change.isEnabled()
+    change.click()
+    assert gcp_crs(ch) == "LOCAL"
+    assert ch.crs == "EPSG:4326" and ch.cameras[0].est == original_pose
+    assert ch.georef["rows"] == [] and len(ch.georef["marker_image_errors"]) == 3
+    assert any("Local Coordinates" in label.text() for label in panel.findChildren(QLabel))
+    assert window.undo_markers() and gcp_crs(ch) == "EPSG:4326"
+    assert window.redo_markers() and gcp_crs(ch) == "LOCAL"
+    assert window.edit_marker_cell("P0", 1, "26100")
+    assert ch.markers[0]["ref"][0] == 26100
+
+    dialog = AlignPhotosDialog(window)
+    assert dialog.use_gcps.isEnabled()
+    dialog.use_gcps.setChecked(True)
+    assert g.CRS.parse(dialog.settings()["gcp_crs"]).kind == "local"
+    assert not dialog.gps_frame.isEnabled()
+    monkeypatch.setattr(OptimizeCamerasDialog, "exec", lambda _: True)
+    calls = []
+    monkeypatch.setattr(window, "_run", lambda *args: calls.append(args))
+    window.optimize_cameras()
+    assert len(calls) == 1
+    cfg = json.loads((Path(ch.workdir) / "georef_task.json").read_text(encoding="utf-8"))
+    assert g.CRS.parse(cfg["crs"]).kind == "local"
+    assert cfg["offset"] is None and not cfg["camera_gps"]
+    path = tmp_path / "gcp_crs.pmsx"
+    window.project.save(str(path))
+    restored = Project.load(str(path)).dataset
+    assert restored.crs == "EPSG:4326" and gcp_crs(restored) == "LOCAL"
+
+
+def test_gcp_epsg_field_accepts_metric_projected_systems_only(qtbot):
+    from photomesh.dialogs import GcpCoordinatesDialog
+
+    dialog = GcpCoordinatesDialog("LOCAL")
+    qtbot.addWidget(dialog)
+    dialog.system.setCurrentIndex(dialog.system.count() - 1)
+    assert dialog.code.isEnabled()
+    dialog.code.setText("32638")
+    assert dialog.selected_crs() == "EPSG:32638"
+    dialog.code.setText("EPSG:2263")
+    with pytest.raises(ValueError):
+        dialog.selected_crs()

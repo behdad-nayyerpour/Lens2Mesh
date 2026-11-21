@@ -721,7 +721,7 @@ def marker_error_summary(markers, rows):
     return summary
 
 
-def markers_panel(table, import_points):
+def markers_panel(table, import_points, change_coordinates):
     from PySide6.QtWidgets import QTabBar
     panel = QWidget()
     layout = QVBoxLayout(panel)
@@ -740,7 +740,7 @@ def markers_panel(table, import_points):
     coordinate = QLabel("Not set")
     coordinate.setWordWrap(True)
     change = QPushButton("Change…")
-    change.setEnabled(False)
+    change.clicked.connect(lambda: change_coordinates())
     coordinate_row.addWidget(coordinate, 1)
     coordinate_row.addWidget(change)
     readiness = QLabel()
@@ -788,14 +788,14 @@ def markers_panel(table, import_points):
         open_photos.setEnabled(bool(rows))
 
     def update_panel(dataset, ready_count):
-        reference = dataset.crs or (dataset.georef or {}).get("crs")
-        if reference:
-            from .georef import CRS
-            try:
-                reference = CRS.parse(reference).name
-            except ValueError:
-                pass
-        coordinate.setText(reference or "Not set")
+        from .alignment_reference import gcp_crs
+        from .georef import CRS
+        reference = gcp_crs(dataset)
+        try:
+            reference = CRS.parse(reference).name
+        except ValueError:
+            pass
+        coordinate.setText(reference)
         readiness.setText(f"Controls with enough placements: {ready_count}")
         for index, group in enumerate(("Control points", "Check points")):
             totals = table.error_summary[group]

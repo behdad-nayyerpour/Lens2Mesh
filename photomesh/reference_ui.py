@@ -12,6 +12,7 @@ from .filedialogs import QFileDialog
 
 from . import colmap as cm
 from . import georef as g
+from .alignment_reference import gcp_crs, gcp_frame_matches_model, model_crs
 
 
 GEOREF_STALE = "built before the last georeferencing (Optimize Cameras)"
@@ -112,7 +113,8 @@ class ReferenceMixin:
             estimates, pixels, counts, rows = g.marker_diagnostics(
                 model, markers, g.CRS.parse(georef.get("crs") or self.dataset.crs),
                 georef.get("offset"), georef.get("zone"), cache=self._marker_residual_cache[1], frame=georef.get("coordinate_frame"),
-                compare_heights=georef.get('reference_heights_verified', True))
+                compare_heights=(gcp_frame_matches_model(self.dataset)
+                                 and georef.get('reference_heights_verified', True)))
         except (ValueError, np.linalg.LinAlgError) as error:
             self.log(f"GCP residuals unavailable after edit: {error}")
             return
@@ -141,6 +143,8 @@ class ReferenceMixin:
         gr = self.dataset.georef or {}
         if gr.get("offset") is not None and m.ref is not None:
             try:
+                if not gcp_frame_matches_model(self.dataset):
+                    return None
                 crs = g.CRS.parse(gr.get("crs") or self.dataset.crs)
                 X = crs.to_metric(np.atleast_2d(np.asarray(m.ref, float)), gr.get("zone"), gr.get("coordinate_frame"))[0]
                 return X - np.asarray(gr["offset"], float)
@@ -161,7 +165,7 @@ class ReferenceMixin:
         if model is None:
             return None
         key0 = (self._model_cache[0], _json.dumps(self.dataset.georef.get("offset") if self.dataset.georef else None),
-                self.dataset.crs, _json.dumps((self.dataset.georef or {}).get("zone")),
+                self.dataset.crs, gcp_crs(self.dataset), _json.dumps((self.dataset.georef or {}).get("zone")),
                 _json.dumps((self.dataset.georef or {}).get("coordinate_frame")),
                 tuple((c.colmap_name, c.path, c.width, c.height) for c in self.dataset.cameras))
         cache = getattr(self, "_marker_xyz_cache", None)
@@ -268,20 +272,54 @@ class ReferenceMixin:
         self._commit_markers(ms)
 
     # ------------------------------------------------------------ import / export
+    def change_gcp_coordinates(self):
+        from .dialogs import GcpCoordinatesDialog
+
+        ch = self.dataset
+        current = gcp_crs(ch)
+        dialog = GcpCoordinatesDialog(current, self)
+        if not dialog.exec():
+            return
+        target = dialog.selected_crs()
+        if target == current:
+            return
+        points = self._marker_objs()
+        try:
+            crs = g.CRS.parse(target)
+            for point in points:
+                if point.ref is not None:
+                    g.validate_control_reference(point, crs)
+        except ValueError as error:
+            QMessageBox.warning(self, dialog.windowTitle(), str(error))
+            return
+        self._markers_snapshot()
+        ch.reference_settings["gcp_crs"] = target
+        self._commit_markers(points, f"GCP coordinate system assigned: {crs.name}")
+
     def import_markers(self, path=None):
         path = path or QFileDialog.getOpenFileName(
             self, "Import GCPs / Reference", "",
             "GCPs and reference (*.xml *.txt *.csv);;All files (*)")[0]
         if not path:
             return
+        ch = self.dataset
         try:
-            new, crs = g.import_markers(path)
+            new, crs = g.import_markers(path, default_crs=ch.reference_settings.get("gcp_crs") or model_crs(ch))
         except Exception as e:
             QMessageBox.warning(self, "Import GCPs", f"Cannot read {path}:\n{e}"); return
-        ms = g.merge_markers(self._marker_objs(), new)
-        if crs is not None and (crs.kind != "local" or not self.dataset.crs):
-            self.dataset.crs = crs.name if crs.kind != "local" else 'LOCAL_CS["Local Coordinates (m)"]'
-        self._commit_markers(ms)
+        existing = self._marker_objs()
+        supplied_refs = {point.label for point in new if point.ref is not None}
+        if crs is not None and supplied_refs:
+            if (crs != g.CRS.parse(gcp_crs(ch))
+                    and any(point.ref is not None and point.label not in supplied_refs for point in existing)):
+                QMessageBox.warning(self, "Import GCPs",
+                    "The imported coordinates use a different system from the existing points. "
+                    "Convert the imported XYZ to the GCP system or replace all existing reference coordinates.")
+                return
+        self._markers_snapshot()
+        if crs is not None and supplied_refs:
+            ch.reference_settings["gcp_crs"] = (f'LOCAL_CS["{crs.name}"]' if crs.kind == "local" else crs.name)
+        self._commit_markers(g.merge_markers(existing, new))
         nproj = sum(len(m.projections) for m in new)
         self.log(f"Imported {len(new)} GCPs ({nproj} photo projections) from {path}; "
                  f"coordinate system: {crs.name if crs else 'unknown'}")
@@ -296,9 +334,9 @@ class ReferenceMixin:
         if not dst:
             return
         if dst.lower().endswith(".xml"):
-            g.write_markers_xml(dst, self._marker_objs(), self.dataset.crs or "")
+            g.write_markers_xml(dst, self._marker_objs(), gcp_crs(self.dataset))
         else:
-            crs = g.CRS.parse(self.dataset.crs)
+            crs = g.CRS.parse(gcp_crs(self.dataset))
             if rows:
                 g.write_report(dst, rows, crs)
             else:
@@ -331,6 +369,12 @@ class ReferenceMixin:
             return
         s = dlg.settings()
         local_control_grid = s["local_control_grid"]
+        target_crs = model_crs(ch)
+        if s.get("use_local_override", local_control_grid):
+            target_crs = g.CRS.parse("LOCAL").name
+        elif s["use_markers"] and any(point.get("ref") is not None for point in ch.markers):
+            target_crs = gcp_crs(ch)
+        frame_changed = g.CRS.parse(model_crs(ch)) != g.CRS.parse(target_crs)
         gps_on = use_photo_gps(ch)
         requested_cameras = s["use_cameras"] if gps_on else ch.reference_settings.get("use_cameras", True)
         s["use_cameras"] = gps_on and s["use_cameras"]
@@ -343,10 +387,10 @@ class ReferenceMixin:
         from .photo_gps import camera_accuracies
         wd = self.project.default_workdir(ch)
         cfg = {"model": self._model_dir(), "photo_sizes": photo_dimensions(ch),
-               "markers": ch.markers or [], "crs": ch.crs or "",
+               "markers": ch.markers or [], "crs": target_crs,
                "use_markers": s["use_markers"], "use_cameras": s["use_cameras"],
                "camera_gps": camera_gps(ch) if s["use_cameras"] else {},
-               "camera_accuracies": camera_accuracies(ch) if s["use_cameras"] else {},
+               "camera_accuracies": camera_accuracies(ch, reported=s.get("reported_gps_accuracy", False)) if s["use_cameras"] else {},
                "strict_heights": True,
                "accuracies": s["accuracies"], "bundle": s["bundle"], "tie_points": s["tie_points"],
                "fit_intrinsics": s["fit_intrinsics"], "offset": (ch.georef or {}).get("offset"),
@@ -359,13 +403,12 @@ class ReferenceMixin:
                "result": os.path.join(wd, "georef.json"),
                "transform_files": [p for p in (ch.point_cloud_ply, ch.model_ply,
                                               os.path.join(wd, "dense", "fused.ply")) if p]}
-        if local_control_grid:
-            cfg["crs"] = g.CRS.parse("LOCAL").name
-        if local_control_grid or bool(cfg['coordinate_frame']) != (cfg['adjustment_frame'] == 'enu'):
+        if local_control_grid or frame_changed or bool(cfg['coordinate_frame']) != (cfg['adjustment_frame'] == 'enu'):
             cfg['offset'] = None
             cfg['coordinate_frame'] = None
-        if not ch.georef and cfg["camera_gps"] and (ch.crs or "") == "" and s["use_cameras"]:
+        if not cfg["crs"] and cfg["camera_gps"] and s["use_cameras"]:
             cfg["crs"] = "EPSG:4326"
+        cfg["compare_marker_xyz"] = (s["use_markers"] or g.CRS.parse(gcp_crs(ch)) == g.CRS.parse(cfg["crs"]))
         try:
             status = g.reference_status(self._sparse_model(), self._marker_objs() if s["use_markers"] else [],
                                         g.CRS.parse(cfg["crs"]), cfg["camera_gps"])
@@ -373,6 +416,10 @@ class ReferenceMixin:
             QMessageBox.warning(self, "Optimize Cameras", str(error))
             return
         status["imported"] = len(ch.markers or [])
+        if s["use_markers"] and frame_changed and status["usable"] < 3 and not local_control_grid:
+            QMessageBox.information(self, "Optimize Cameras",
+                f"Only {status['usable']} usable GCPs. At least three non-collinear GCPs are needed to change the model CRS.")
+            return
         ready = ((s["use_markers"] and status["usable"] >= 3) or
                  (s["use_cameras"] and status["gps"] >= 3))
         if not ready:
@@ -406,12 +453,18 @@ class ReferenceMixin:
 
         def loaded():
             res = json.load(open(cfg["result"], encoding="utf-8"))
+            if not s["use_cameras"] or not s["bundle"]:
+                reference_settings.pop("reported_gps_accuracy", None)
             ch.reference_settings.update(reference_settings)
             if res.get("similarity") is not None:
                 products_after_georef(ch, res["similarity"], self.log)
             self._invalidate_camera_products(ch)
             if not res.get("local_only"):
                 from .alignment_reference import GEOREF_FIELDS
+                if s["use_markers"] and status["usable"] >= 3:
+                    ch.reference_settings["gcp_crs"] = target_crs
+                elif ch.markers:
+                    ch.reference_settings.setdefault("gcp_crs", gcp_crs(ch))
                 ch.georef = {k: res.get(k) for k in GEOREF_FIELDS}
                 ch.crs = res.get("crs") or ch.crs
                 for r in ch.georef.get("rows") or []:

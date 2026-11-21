@@ -23,13 +23,15 @@ class RegistrationMixin:
         model_dir=self._model_dir()
         model=cio.read_model(model_dir)
         from . import georef as g
+        from .alignment_reference import gcp_frame_matches_model
         from .photonames import photo_dimensions
         g.validate_projection_dimensions(model,photo_dimensions(ch))
         positions={}
+        matching_frame = bool(ch.georef) and gcp_frame_matches_model(ch)
         for marker in self._marker_objs():
             if marker.disabled or not marker.enabled:
                 continue
-            if marker.ref is not None and ch.georef:
+            if marker.ref is not None and matching_frame:
                 positions[marker.label] = (g.CRS.parse(ch.georef.get("crs") or ch.crs).to_metric(
                     np.atleast_2d(marker.ref),ch.georef.get("zone"), ch.georef.get("coordinate_frame"))[0] -
                     np.asarray(ch.georef.get("offset") or [0,0,0],float))
