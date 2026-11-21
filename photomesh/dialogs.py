@@ -76,10 +76,6 @@ class AlignPhotosDialog(_SettingsDialog):
         from .photo_gps import use_photo_gps
         dataset = getattr(parent, "dataset", None)
         self.photo_gps_on = use_photo_gps(dataset) if dataset is not None else True
-        self.reference.setChecked(self.photo_gps_on)
-        self.reference.setEnabled(self.photo_gps_on)
-        self.reset = QCheckBox("Rebuild alignment transactionally")
-        self.reset.hide()
         self.mode = _combo(["Fast", "Exhaustive", "Sequential"], "Fast")
         self.mode.setToolTip("Fast: fastpipe pair preselection (GPS + global descriptor + sequence)\n"
                              "with coarse-to-fine alignment. Exhaustive: match all pairs.")
@@ -107,29 +103,62 @@ class AlignPhotosDialog(_SettingsDialog):
         self.feature_method.currentTextChanged.connect(update_neural_warning)
         update_neural_warning()
         self.gps_frame = QCheckBox("Use photo GPS to locate, scale and orient the model")
-        cameras = getattr(getattr(parent, "dataset", None), "cameras", [])
+        cameras = getattr(dataset, "cameras", [])
         from .engine import gps_frame_available
-        project_dataset=getattr(parent,"dataset",None)
-        existing=bool(project_dataset and (project_dataset.georef or project_dataset.aligned_count()))
-        ready,reason=gps_frame_available(cameras,getattr(project_dataset,"crs",""),existing, respect_legacy_flags=False)
-        self.gps_frame.setChecked(ready and self.photo_gps_on)
+        from .alignment_reference import HEIGHT_REFERENCES, control_availability
+        existing = bool(dataset and (dataset.georef or dataset.aligned_count()))
+        ready, reason = gps_frame_available(cameras, getattr(dataset, "crs", ""), respect_legacy_flags=False)
+        self.gps_frame.setChecked(ready and self.photo_gps_on and not existing)
         self.gps_frame.setEnabled(ready and self.photo_gps_on)
         self.gps_frame.setToolTip(reason if self.photo_gps_on else "Photo GPS is disabled in Settings.")
         self.gform.addRow(self.gps_frame)
-        self.control_preview = QCheckBox("Use ground control point to locate, scale and orient the model")
-        self.control_preview.setEnabled(False)
-        self.gform.addRow(self.control_preview)
+        self.use_gcps = QCheckBox("Use ground control points to locate, scale and orient the model")
+        gcp_ready, gcp_reason = control_availability(dataset)
+        self.gcp_coordinates = QComboBox()
+        project_crs = getattr(dataset, "crs", "")
+        current_crs = f"Current ({project_crs or 'local XYZ in metres'})" if len(project_crs) < 60 else "Current project CRS"
+        self.gcp_coordinates.addItem(current_crs, None)
+        alternate_crs = "LOCAL" if project_crs else "EPSG:4326"
+        alternate_ready, alternate_reason = control_availability(dataset, alternate_crs)
+        if alternate_ready and alternate_reason != gcp_reason:
+            self.gcp_coordinates.addItem("Local survey grid (XYZ in metres)" if project_crs else "WGS84 longitude / latitude",
+                                         alternate_crs)
+            if not gcp_ready:
+                gcp_reason += f" Select the applicable GCP coordinate system. {alternate_reason}"
+        self.use_gcps.setEnabled(gcp_ready or alternate_ready)
+        self.use_gcps.setToolTip(gcp_reason)
+        self.gform.addRow(self.use_gcps)
+        coordinates_label = QLabel("GCP coordinate system:")
+        self.gform.addRow(coordinates_label, self.gcp_coordinates)
+        self.common_heights = QComboBox()
+        for label, value in HEIGHT_REFERENCES:
+            self.common_heights.addItem(label, value)
+        reference_settings = dataset.reference_settings if dataset is not None else {}
+        camera_height = reference_settings.get("camera_height_reference")
+        if camera_height == reference_settings.get("marker_height_reference"):
+            self.common_heights.setCurrentIndex(max(0, self.common_heights.findData(camera_height)))
+        self.common_heights.setToolTip("Select only if the photo GPS and GCP heights already share this reference. "
+                                       "Heights are not converted.")
+        height_label = QLabel("Common height reference:")
+        self.gform.addRow(height_label, self.common_heights)
         self.gps_priors = QCheckBox("Also constrain individual camera positions with GPS")
-        self.gps_priors.setToolTip('Optional position constraints after image-based reconstruction. Uses the selected GPS accuracy; control markers are not silently added to initial alignment.')
-        self.gps_priors.setEnabled(self.gps_frame.isChecked())
-        self.gps_frame.toggled.connect(self.gps_priors.setEnabled)
+        self.gps_priors.setToolTip("Optional with GPS alone. When GPS and GCPs are selected, the adjustment uses both.")
+        def update_reference_controls():
+            combined = self.gps_frame.isChecked() and self.use_gcps.isChecked()
+            show_coordinates = self.use_gcps.isChecked() and self.gcp_coordinates.count() > 1
+            coordinates_label.setVisible(show_coordinates)
+            self.gcp_coordinates.setVisible(show_coordinates)
+            height_label.setVisible(combined)
+            self.common_heights.setVisible(combined)
+            self.gps_priors.setEnabled(self.gps_frame.isChecked() and not self.use_gcps.isChecked())
+        self.gps_frame.toggled.connect(update_reference_controls)
+        self.use_gcps.toggled.connect(update_reference_controls)
+        update_reference_controls()
         self.gform.addRow(self.gps_priors)
         self.gform.addRow("Image resolution:", self.accuracy)
         self.gform.addRow(self.c2f)
         self.gform.addRow(self.generic)
-        row = QHBoxLayout()
-        row.addWidget(self.reference)
-        self.gform.addRow(row)
+        self.gform.addRow(self.reference)
         self.key_limit = QSpinBox(); self.key_limit.setRange(0, 1_000_000); self.key_limit.setSpecialValueText("Engine default"); self.key_limit.setValue(24000)
         self.guided = QCheckBox("Find extra matches using image geometry")
         self.single_camera = QCheckBox("Share lens calibration between compatible photos")
@@ -155,14 +184,14 @@ class AlignPhotosDialog(_SettingsDialog):
             neural = self.feature_method.currentText() != "SIFT"
             self.key_limit.setMaximum(4096 if neural else 1_000_000)
             self.key_limit.setValue(2048 if neural else 24000)
-            self.c2f.setEnabled(not neural and self.mode.currentText()=="Fast")
+            update_matching_controls()
+        def update_matching_controls():
+            fast = self.mode.currentText() == "Fast"
+            self.c2f.setEnabled(fast and self.feature_method.currentText() == "SIFT")
+            self.generic.setEnabled(fast)
         self.feature_method.currentTextChanged.connect(feature_limits)
-        self.mode.currentTextChanged.connect(lambda *_: self.c2f.setEnabled(self.feature_method.currentText()=="SIFT" and self.mode.currentText()=="Fast"))
-        def pair_mode(text):
-            self.generic.setEnabled(text == "Fast")
-            self.reference.setEnabled(text == "Fast")
-        self.mode.currentTextChanged.connect(pair_mode)
-        pair_mode(self.mode.currentText())
+        self.mode.currentTextChanged.connect(update_matching_controls)
+        update_matching_controls()
         from .workflow_ui import alignment_context
         alignment_context(self, parent)
         palette = self.summary.palette()
@@ -188,18 +217,21 @@ class AlignPhotosDialog(_SettingsDialog):
 
     def settings(self):
         QSettings().setValue('align/camera_model', self.camera_model.currentData())
+        gps = self.gps_frame.isEnabled() and self.gps_frame.isChecked()
+        gcps = self.use_gcps.isEnabled() and self.use_gcps.isChecked()
         return {"accuracy": self.accuracy.currentData() or self.accuracy.currentText(),
                 "generic": self.generic.isChecked(),
                 "mode": self.mode.currentText(),
                 "mapper": self.mapper.currentText(),
                 "feature_method": self.feature_method.currentText(),
-                "gps_frame": self.gps_frame.isChecked(),
-                "gps_priors": self.gps_priors.isChecked() and self.gps_frame.isChecked() and self.photo_gps_on,
+                "gps_frame": gps,
+                "use_gcps": gcps,
+                "gcp_crs": self.gcp_coordinates.currentData() if gcps else None,
+                "common_height_reference": self.common_heights.currentData() if gps and gcps else None,
+                "gps_priors": self.gps_priors.isEnabled() and self.gps_priors.isChecked(),
                 "reported_gps_accuracy": self.reported_accuracy.isChecked(),
-                "coarse_to_fine": self.c2f.isChecked(),
-                "reference": self.reference.isChecked(),
-                "sequential": self.mode.currentText() == "Sequential",
-                "reset": self.reset.isChecked(),
+                "coarse_to_fine": self.c2f.isEnabled() and self.c2f.isChecked(),
+                "reference": self.reference.isEnabled() and self.reference.isChecked(),
                 "key_point_limit": self.key_limit.value(),
                 "guided_matching": self.guided.isChecked(),
                 "single_camera": self.single_camera.isChecked(),
@@ -383,10 +415,10 @@ class OptimizeCamerasDialog(_SettingsDialog):
         from PySide6.QtWidgets import QDoubleSpinBox
         from .georef import DEFAULTS
         s = dict(DEFAULTS); s.update(settings or {})
-        self.use_markers = QCheckBox("Use control markers (XYZ + placements on 2 or more aligned photos)")
+        self.use_markers = QCheckBox("Use GCPs (XYZ + placements on 2 or more aligned photos)")
         self.use_markers.setChecked(bool(s.get("use_markers", True)))
-        self.use_markers.setToolTip("Unchecked excludes marker coordinates and image observations from optimization. "
-                                    "Marker estimates/errors can still be displayed for checking. Predictions alone are display hints; pin or refine placements on photos before adjustment. "
+        self.use_markers.setToolTip("Unchecked excludes GCP coordinates and image observations from optimization. "
+                                    "GCP estimates/errors can still be displayed for checking. Predictions alone are display hints; pin or refine placements on photos before adjustment. "
                                     "At least 3 non-collinear controls are needed to georeference. "
                                    "Without sufficient reference data, local bundle adjustment is offered.")
         self.use_cameras = QCheckBox("Use camera GPS (geographic or supported metre-based CRS)")
@@ -428,8 +460,8 @@ class OptimizeCamerasDialog(_SettingsDialog):
         self.reported_accuracy.setToolTip('Valid per-photo E/N/height deviations override the fallback accuracy below. Unknown or inconsistent metadata uses the fallback. No vertical datum conversion is automatic.')
         self.aform.addRow(self.reported_accuracy)
         self.aform.addRow("Fallback camera accuracy XY / Z (m):", _pair(self.cam_acc, self.cam_acc_z))
-        self.aform.addRow("Marker accuracy XY / Z (m):", _pair(self.mk_acc, self.mk_acc_z))
-        self.aform.addRow("Marker projection accuracy (px):", self.proj_acc)
+        self.aform.addRow("GCP accuracy XY / Z (m):", _pair(self.mk_acc, self.mk_acc_z))
+        self.aform.addRow("GCP projection accuracy (px):", self.proj_acc)
         self.aform.addRow("Tie point accuracy (px):", self.tie_acc)
         self.aform.addRow("Tie points used in adjustment:", self.ties)
         preset = s.get('intrinsics', 'f,cx,cy,k1-k3,p1,p2')
@@ -444,10 +476,10 @@ class OptimizeCamerasDialog(_SettingsDialog):
         self.adjustment_frame.setCurrentIndex(1 if (getattr(dataset, 'georef', {}) or {}).get('coordinate_frame') else 0)
         self.aform.addRow('Adjustment frame:', self.adjustment_frame)
         self.height_references = {}
+        from .alignment_reference import HEIGHT_REFERENCES
         for key, label in [('camera', 'Photo GPS height reference:'), ('marker', 'Control height reference:')]:
             box = QComboBox()
-            for text, value in [('Unknown / not confirmed', 'unknown'), ('WGS84 ellipsoidal', 'ellipsoidal'),
-                                ('Orthometric / geoid-based', 'orthometric'), ('Local height datum', 'local')]:
+            for text, value in HEIGHT_REFERENCES:
                 box.addItem(text, value)
             box.setCurrentIndex(max(0, box.findData(s.get(key + '_height_reference', 'unknown'))))
             self.height_references[key] = box
@@ -726,7 +758,7 @@ class PreferencesDialog(QDialog):
         self.use_photo_gps = QCheckBox("Use Photo GPS")
         self.use_photo_gps.setChecked(use_photo_gps(self.dataset) if self.dataset is not None else True)
         self.use_photo_gps.setToolTip("Use valid photo GPS for pair preselection and camera references. "
-                                     "Adding markers does not change this setting. Photos remain included when GPS is off.")
+                                     "Adding GCPs does not change this setting. Photos remain included when GPS is off.")
         gf.addRow(self.use_photo_gps)
         if self.dataset is not None and "use_photo_gps" not in self.dataset.reference_settings and not self.use_photo_gps.isChecked():
             legacy_note = QLabel("Photo GPS is off to preserve this older project's reference exclusions. "

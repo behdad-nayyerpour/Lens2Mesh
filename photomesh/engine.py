@@ -417,8 +417,11 @@ def gps_frame_available(cameras, crs="", existing_alignment=False, *, respect_le
     from .georef import CRS, utm_forward, geographic_zone, valid_gps
     if existing_alignment:
         return False, "The existing project frame is preserved. Use Optimize Cameras to apply GPS to this project."
-    if crs and CRS.parse(crs).kind == "local":
-        return False, "Choose a geographic/UTM project CRS before using camera GPS."
+    try:
+        if crs and CRS.parse(crs).kind == "local":
+            return False, "Choose a geographic/projected project CRS before using camera GPS."
+    except ValueError as error:
+        return False, str(error)
     values=[]
     for camera in cameras:
         if not camera.enabled or (respect_legacy_flags and not camera.use_reference):

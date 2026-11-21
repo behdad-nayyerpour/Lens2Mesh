@@ -736,7 +736,7 @@ class OrthoView(QWidget):
         m = QMenu(self)
         hit = self.marker_at(e.pos().x(), e.pos().y())
         if hit:
-            m.addAction(f"Select Marker: {hit}").triggered.connect(
+            m.addAction(f"Select GCP: {hit}").triggered.connect(
                 lambda: self.markerAction.emit("select", hit))
             m.addSeparator()
         X, Y, Z = self.coordinates_at(e.pos().x(), e.pos().y())

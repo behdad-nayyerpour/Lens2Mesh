@@ -100,7 +100,7 @@ def choose_input(workdir):
     # Coarse-to-fine uses a different feature database. Its camera snapshots
     # must never seed final-resolution tracks, even if they contain more cameras.
     candidates=list((root/'checkpoints'/'sparse').glob('**/images.bin'))
-    if (root/'sparse/0/images.bin').exists():candidates.append(root/'sparse/0/images.bin')
+    candidates.extend(image for image in (root/'sparse').glob('*/images.bin') if image.parent.name.isdecimal())
     ranked=[]
     for image in candidates:
         try:
@@ -151,7 +151,7 @@ def steps(exe,workdir,record,dataset,execution=None):
         planned+=mapper_steps(exe,str(root/'database.db'),cm.image_dir(workdir),str(sparse),
                               settings,len([c for c in dataset.cameras if c.enabled]),cm.image_list(workdir))
     else:
-        # GPS task preserves this raw model before transforming its published
+        # Georeferencing preserves this raw model before transforming its
         # working copy. Reuse it to avoid a second transform after interruption.
         backup=root/'sparse/0_original'
         if backup.exists():

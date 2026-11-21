@@ -94,6 +94,21 @@ def test_model_num_images(tmp_path):
     assert fp.model_num_images(str(tmp_path / "missing")) == 0
 
 
+def test_primary_reconstruction_prefers_the_largest_valid_component(tmp_path):
+    import struct
+    from photomesh import colmap_io as cio
+    from test_dense_mesh_gcp import synthetic_model
+
+    cio.write_model(tmp_path / "0", synthetic_model(n_img=3, n_pts=100))
+    cio.write_model(tmp_path / "1", synthetic_model(n_img=5, n_pts=100))
+    (tmp_path / "2").mkdir()
+    (tmp_path / "2/images.bin").write_bytes(struct.pack("<Q", 20))
+    assert "5 registered photos" in fp._select_primary_model(tmp_path)[0][1]
+    assert len(cio.read_model(tmp_path / "0").images) == 5
+    former, = tmp_path.glob("alternate-primary-*")
+    assert len(cio.read_model(former).images) == 3
+
+
 # ------------------------------------------------- coarse-to-fine refinement
 def _fast_wd(tmp_path, monkeypatch, n=5, registered=3):
     monkeypatch.setattr(cm, "colmap_options", lambda exe, c: set())

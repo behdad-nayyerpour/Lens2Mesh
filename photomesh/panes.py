@@ -149,7 +149,7 @@ class WorkspacePane(QTreeWidget):
                 active = ci == project.active
                 parts = [f"{len(ch.cameras):,} images"]
                 if ch.markers:
-                    parts.append(f"{len(ch.markers):,} markers")
+                    parts.append(f"{len(ch.markers):,} GCPs")
                 if ch.tie_point_count:
                     parts.append(f"{ch.tie_point_count:,} tie points")
                 crs = (ch.georef or {}).get("crs") or ch.crs
@@ -182,7 +182,7 @@ class WorkspacePane(QTreeWidget):
                     par.addChild(ci_)
                 if ch.markers:
                     nctl = sum(1 for m in ch.markers if m.get("enabled", True))
-                    mk = self._item(it, f"Markers ({len(ch.markers):,})", ("markers", ci), "markers",
+                    mk = self._item(it, f"GCPs ({len(ch.markers):,})", ("markers", ci), "markers",
                                     layer=lay("markers"),
                                     tip=f"{nctl} control, {len(ch.markers) - nctl} check")
                     for m in ch.markers:
@@ -344,10 +344,10 @@ class WorkspacePane(QTreeWidget):
         if d and d[0] in ("tie", "cloud", "model", "tiled", "ortho", "dem", "shapes"):
             m.addSeparator(); m.addAction("Show")
         if d and d[0] in ("marker", "markers"):
-            m.addSeparator(); m.addAction("Add Marker")
+            m.addSeparator(); m.addAction("Add GCP")
             if d[0] == "marker":
-                m.addAction("Rename Marker..."); m.addAction("Remove Marker")
-            m.addAction("Filter Photos by Markers"); m.addAction("Reset Filter")
+                m.addAction("Rename GCP..."); m.addAction("Remove GCP")
+            m.addAction("Filter Photos by GCPs"); m.addAction("Reset Filter")
         if d and d[0] in ("shapes", "shape_layer", "shape"):
             m.addSeparator()
             m.addAction({"shapes": "Shape Settings...", "shape_layer": "Layer Style...",
@@ -372,11 +372,11 @@ class WorkspacePane(QTreeWidget):
                 self.contextAction.emit(f"shape_style:shape:{d[2]}", ci)
             elif a.text() == "Shape Settings...":
                 self.contextAction.emit("shape_style:all:", ci)
-            elif a.text() in ("Rename Marker...", "Remove Marker", "Filter Photos by Markers", "Reset Filter",
-                              "Add Marker"):
+            elif a.text() in ("Rename GCP...", "Remove GCP", "Filter Photos by GCPs", "Reset Filter",
+                              "Add GCP"):
                 labels = [r[2] for r in self.selected_roles() if r[0] == "marker"] or \
                     ([d[2]] if d[0] == "marker" else [])
-                if a.text() == "Filter Photos by Markers" and d[0] == "markers" and not labels:
+                if a.text() == "Filter Photos by GCPs" and d[0] == "markers" and not labels:
                     labels = ["*"]
                 self.contextAction.emit("marker:" + a.text() + ":" + "\x1f".join(labels), ci)
             else:
@@ -509,7 +509,7 @@ class MarkersPane(QTableWidget):
 
     Double-click a Markers / X / Y / Z / Accuracy cell to edit it (validated by
     the main window; Edit > Undo reverts). Double-click another cell opens the
-    marker's photo. Right-click: Add / Rename / Remove Marker. The checkbox
+    marker's photo. Right-click: Add / Rename / Remove GCP. The checkbox
     makes the marker a control (checked) or check (unchecked) point."""
     COLS = ["Point", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
             "Error (m)", "Pins", "Error (px)", "Role", "Status", "Auto"]
@@ -570,7 +570,7 @@ class MarkersPane(QTableWidget):
         self.setRowCount(len(ms))
         self._marker_groups = [bool(m.get("enabled", True)) for m in ms]
         self.error_summary = marker_error_summary(ms, rows)
-        from .georef import _stem
+        from .georef import _stem, projection_is_measured, projection_is_refined
         aligned = {_stem(c.colmap_name or c.label) for c in dataset.cameras if c.aligned and c.enabled}
         controls_with_pins = 0
         dark = self.palette().color(QPalette.Base).lightness() < 128
@@ -582,7 +582,7 @@ class MarkersPane(QTableWidget):
             proj = m.get("projections", {})
             pins = {name for name, value in proj.items() if len(value) < 3 or value[2]}
             pinned = len(pins)
-            automatic = sum(len(v) > 3 and not v[2] and v[3] == "refined" for v in proj.values())
+            automatic = sum(projection_is_refined(v) for v in proj.values())
             predicted = sum(len(v) > 3 and not v[2] and v[3] == "predicted" for v in proj.values())
             manual_on_aligned = len({_stem(name) for name in pins} & aligned)
             control = m.get("enabled", True)
@@ -596,7 +596,9 @@ class MarkersPane(QTableWidget):
                 status = "Needs aligned pins"
             else:
                 status = "Measured" if e.get("pix") is not None else "Pins ready"
-                controls_with_pins += int(control)
+            if control and not m.get("disabled") and m.get("ref") is not None:
+                observed = {_stem(name) for name, value in proj.items() if projection_is_measured(value)}
+                controls_with_pins += len(observed & aligned) >= 2
             vals = [m["label"], _fmt(ref[0], 4), _fmt(ref[1], 4), _fmt(ref[2], 4),
                     "" if not acc else (f"{acc[0]:.3f}" if acc[0] == acc[1] else f"{acc[0]:.3f}/{acc[1]:.3f}"),
                     _fmt(e.get("total"), 4), str(pinned), _fmt(e.get("pix"), 3),
@@ -685,8 +687,8 @@ class MarkersPane(QTableWidget):
             self.selectRow(it.row())
         labels = self.selected_labels()
         m = QMenu(self)
-        m.addAction("Add Marker")
-        for name in ("Rename Marker...", "Remove Markers"):
+        m.addAction("Add GCP")
+        for name in ("Rename GCP...", "Remove GCPs"):
             a = m.addAction(name)
             a.setEnabled(bool(labels))
         a = m.exec(self.viewport().mapToGlobal(pos))
@@ -730,7 +732,7 @@ def markers_panel(table, import_points):
     import_button = QPushButton("Import points…")
     import_button.clicked.connect(lambda: import_points())
     add_button = QPushButton("Add point")
-    add_button.clicked.connect(lambda: table.markerAction.emit("Add Marker", []))
+    add_button.clicked.connect(lambda: table.markerAction.emit("Add GCP", []))
     top.addWidget(import_button)
     top.addWidget(add_button)
     layout.addLayout(top)
@@ -760,11 +762,12 @@ def markers_panel(table, import_points):
     layout.addWidget(details)
     actions = QHBoxLayout()
     open_photos = QPushButton("Open photos")
-    open_photos.clicked.connect(lambda: table.markerAction.emit("Filter Photos by Markers", table.selected_labels()))
+    open_photos.clicked.connect(lambda: table.markerAction.emit("Filter Photos by GCPs", table.selected_labels()))
     all_photos = QPushButton("All photos")
     all_photos.clicked.connect(lambda: table.markerAction.emit("Reset Filter", []))
     clear_auto = QPushButton("Clear auto placements")
-    clear_auto.setEnabled(False)
+    clear_auto.setToolTip("Clear refined automatic placements for the selected GCP. Manual pins and predictions are retained.")
+    clear_auto.clicked.connect(lambda: table.markerAction.emit("Clear auto placements", table.selected_labels()))
     actions.addWidget(open_photos)
     actions.addWidget(all_photos)
     actions.addWidget(clear_auto)
@@ -772,6 +775,7 @@ def markers_panel(table, import_points):
 
     def update_details():
         rows = table.selectionModel().selectedRows(0)
+        clear_auto.setEnabled(False)
         if len(rows) != 1:
             details.setText("Select a point to see its placements.")
         else:
@@ -780,6 +784,7 @@ def markers_panel(table, import_points):
             auto = table.item(row, 10)
             details.setText(f"{pins.data(ROLE)} · Manual pins: {pins.text()} · "
                             f"Auto placements: {auto.text()} · Predictions: {pins.data(ROLE + 3)}")
+            clear_auto.setEnabled(int(auto.text()) > 0)
         open_photos.setEnabled(bool(rows))
 
     def update_panel(dataset, ready_count):
@@ -865,7 +870,7 @@ class PhotosPane(QListWidget):
     filter = None                      # set of photo indices shown, or None (all)
 
     def set_filter(self, indices):
-        """Filter Photos by Markers: show only these photo indices (None = all)."""
+        """Filter Photos by GCPs: show only these photo indices (None = all)."""
         self.filter = None if indices is None else set(indices)
         for r in range(self.count()):
             it = self.item(r)

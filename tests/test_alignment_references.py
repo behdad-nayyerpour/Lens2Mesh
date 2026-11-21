@@ -1,0 +1,133 @@
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from photomesh import colmap_io as cio, georef as g
+from photomesh.alignment_reference import alignment_reference_config, control_availability
+from photomesh.dialogs import AlignPhotosDialog
+from photomesh.project import Camera
+from test_dense_mesh_gcp import synthetic_model
+
+
+def _data(window, tmp_path):
+    model = synthetic_model(n_img=5, n_pts=100, two_cameras=False)
+    ch = window.dataset
+    ch.crs = "EPSG:32638"
+    base = np.array([450000., 4420000., 100.])
+    from PIL import Image
+    for i, image in enumerate(model.images.values()):
+        path = tmp_path / image.name
+        Image.new("RGB", (600, 450)).save(path)
+        # Make the camera flight non-collinear and preserve its 3-D tracks.
+        center = image.center() + [0, (i % 2) * 5, 0]
+        image.tvec = -image.R() @ center
+        xyz = model.points.xyz[np.maximum(image.point3D_ids, 0)]
+        uv, _ = cio.project(model.cameras[image.camera_id], image.R(), image.tvec, xyz)
+        image.xys[image.point3D_ids >= 0] = uv[image.point3D_ids >= 0]
+        e, n, h = center + base
+        lat, lon = g.utm_inverse(e, n, 38, False)
+        ch.cameras.append(Camera(str(path), lon=float(lon), lat=float(lat), alt=float(h), width=600, height=450))
+    for i, point in enumerate(np.array([[3, 2, 0], [9, 2, 0], [5, 8, 0], [10, 9, 1.]])):
+        observations = {}
+        for image_id, image in model.images.items():
+            uv = g.predict_projection(model, image_id, point)
+            if uv is not None:
+                observations[image.name] = [*uv, True] if i != 2 else [*uv, False, "refined"]
+        ch.markers.append(g.Marker(f"GCP {i}", (point + base).tolist(), enabled=i < 3,
+                                   projections=observations).to_dict())
+    return ch, model
+
+
+def test_dialog_reference_choices_are_independent_and_use_measurements(window, tmp_path):
+    ch, _ = _data(window, tmp_path)
+    dialog = AlignPhotosDialog(window)
+    assert dialog.gps_frame.isEnabled() and dialog.gps_frame.isChecked()
+    assert dialog.use_gcps.isEnabled() and not dialog.use_gcps.isChecked()
+    dialog.use_gcps.setChecked(True)
+    assert not dialog.common_heights.isHidden()
+    dialog.common_heights.setCurrentIndex(dialog.common_heights.findData("ellipsoidal"))
+    settings = dialog.settings()
+    assert settings["use_gcps"] and settings["gps_frame"]
+    assert settings["common_height_reference"] == "ellipsoidal"
+    dialog.gps_frame.setChecked(False)
+    assert dialog.settings()["use_gcps"] and not dialog.settings()["gps_frame"]
+    assert dialog.common_heights.isHidden()
+    for observation in ch.markers[2]["projections"].values():
+        observation[3] = "predicted"
+    assert not control_availability(ch)[0]
+
+
+@pytest.mark.parametrize("gps,gcps", [(False, False), (True, False), (False, True), (True, True)])
+def test_alignment_applies_only_selected_references_and_publishes_diagnostics(window, tmp_path, monkeypatch, gps, gcps):
+    from photomesh import colmap, engine
+
+    ch, model = _data(window, tmp_path)
+    window.project.path = str(tmp_path / "survey.pmsx")
+    old_workdir = ch.workdir
+    monkeypatch.setattr(window, "_require_saved", lambda _: True)
+    monkeypatch.setattr(window, "_need_colmap", lambda: "colmap")
+    monkeypatch.setattr(AlignPhotosDialog, "exec", lambda _: True)
+    settings = {"mode": "Exhaustive", "accuracy": "High", "gps_frame": gps, "use_gcps": gcps,
+                "common_height_reference": "ellipsoidal"}
+    monkeypatch.setattr(AlignPhotosDialog, "settings", lambda _: dict(settings))
+    monkeypatch.setattr(engine, "execution_settings", lambda *_: {})
+    monkeypatch.setattr(window, "reload_view", lambda: None)
+    monkeypatch.setattr(window, "show_view", lambda _: None)
+    monkeypatch.setattr(window, "_photo_map", lambda _: {})
+
+    def plan(*args, **kwargs):
+        workdir = Path(args[2])
+        cio.write_model(str(workdir / "sparse/0"), model)
+        return [("Exporting tie points", ["model_converter"], 1)]
+
+    def run(_title, steps, loaded, _meta, **kwargs):
+        planned = steps[0][1]()
+        workdir, = Path(window.project.data_dir).glob("alignment-*")
+        assert ch.workdir == old_workdir and not ch.georef
+        if gps or gcps:
+            labels = [label for label, _, _ in planned]
+            assert labels.index("Applying alignment references") < labels.index("Exporting tie points")
+            cfg = json.loads((workdir / "alignment_reference.json").read_text(encoding="utf-8"))
+            assert cfg["use_markers"] == gcps and cfg["use_cameras"] == gps
+            if gps and gcps:
+                assert cfg["bundle"] and cfg["camera_height_reference"] == "ellipsoidal"
+            g.run_task(cfg)
+        sparse = workdir / "sparse_txt"
+        sparse.mkdir()
+        exported = cio.read_model(str(workdir / "sparse/0"))
+        lines = []
+        for image_id, image in exported.images.items():
+            lines.extend([" ".join(map(str, [image_id, *image.qvec, *image.tvec, image.camera_id, image.name])), ""])
+        (sparse / "images.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        loaded()
+
+    monkeypatch.setattr(colmap, "align_steps", plan)
+    monkeypatch.setattr(window, "_run", run)
+    window.align_photos()
+    assert ch.aligned_count() == 5
+    if gcps:
+        assert ch.georef["control_rmse"]["total"] < 0.01
+        assert ch.georef["check_rmse"]["total"] < 0.01
+        assert len(ch.georef["marker_image_errors"]) == 4
+        assert all(point["est"] is not None for point in ch.markers)
+    else:
+        assert all(point["est"] is None for point in ch.markers)
+    assert bool(ch.georef) == (gps or gcps)
+
+
+def test_alignment_reference_failure_cannot_fall_back_to_gps(window, tmp_path):
+    ch, model = _data(window, tmp_path)
+    settings = {"gps_frame": True, "use_gcps": True, "common_height_reference": "ellipsoidal"}
+    mapping = {camera.path: Path(camera.path).name for camera in ch.cameras}
+    cfg = alignment_reference_config(ch, settings, mapping, str(tmp_path))
+    # A selected GCP can have enough source measurements but fail to register.
+    cfg["markers"][2]["projections"] = {"missing.jpg": [200, 200, True]}
+    cio.write_model(cfg["model"], model)
+    path = Path(cfg["model"]) / "images.bin"
+    previous = path.read_bytes()
+    with pytest.raises(ValueError, match="Only 2 GCPs"):
+        g.run_task(cfg)
+    assert path.read_bytes() == previous
+    assert not Path(cfg["result"]).exists()

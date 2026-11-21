@@ -183,7 +183,7 @@ def test_alignment_settings_only_expose_functional_options(qtbot):
     dialog.reference.setChecked(False)
     assert not dialog.settings()["reference"]
     dialog.mode.setCurrentText("Sequential")
-    assert dialog.settings()["sequential"] and not dialog.reference.isEnabled()
+    assert dialog.settings()["mode"] == "Sequential" and not dialog.reference.isEnabled()
     mesh = BuildModelDialog(); qtbot.addWidget(mesh)
     assert not hasattr(mesh, "surface") and not hasattr(mesh, "vcolors")
     mesh.face_count.setCurrentText("Custom")

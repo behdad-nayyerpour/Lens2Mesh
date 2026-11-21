@@ -351,7 +351,7 @@ def read_markers_xml(path):
     dataset = next((node for node in root.iter()
                     if node.find("markers") is not None and node.find("cameras") is not None), None)
     if dataset is None:
-        raise ValueError("Marker XML has no camera and marker record container")
+        raise ValueError("GCP XML has no camera and point record container")
     cams = {c.get("id"): c.get("label") for c in dataset.iter("camera") if c.get("label")}
     crs_el = dataset.find("reference")
     crs = CRS.parse(crs_el.text if crs_el is not None and crs_el.text else "")
@@ -542,12 +542,16 @@ def validate_projection_dimensions(model, photo_sizes=None):
         if list(size) != [camera.width, camera.height]:
             raise ValueError(f"{name}: source photo is {size[0]}x{size[1]}, calibration is "
                              f"{camera.width}x{camera.height}. Re-align to restore original photo pixels "
-                             "before measuring or optimizing markers.")
+                             "before measuring or optimizing GCPs.")
+
+
+def projection_is_refined(value):
+    return len(value) > 3 and not value[2] and value[3] == "refined"
 
 
 def projection_is_measured(value):
     """Pins and image-refined locations are measurements; predictions/unknowns are not."""
-    return len(value) < 3 or bool(value[2]) or (len(value) > 3 and value[3] == "refined")
+    return len(value) < 3 or bool(value[2]) or projection_is_refined(value)
 
 
 def marker_image_observations(model, projections, names=None, measured_only=False):
@@ -562,16 +566,16 @@ def marker_image_observations(model, projections, names=None, measured_only=Fals
             continue
         uv = np.asarray(value[:2], float)
         if uv.shape != (2,) or not np.isfinite(uv).all():
-            raise ValueError(f"Invalid marker observation on {label}")
+            raise ValueError(f"Invalid GCP observation on {label}")
         if measured_only and iid in model.images:
             camera = model.cameras[model.images[iid].camera_id]
             if not (0 <= uv[0] < camera.width and 0 <= uv[1] < camera.height):
-                raise ValueError(f"Marker observation lies outside source photo {label}")
+                raise ValueError(f"GCP observation lies outside source photo {label}")
         pinned = len(value) < 3 or bool(value[2])
         if iid in observations:
             old, old_pin = observations[iid]
             if old_pin == pinned and not np.allclose(old, uv, rtol=0, atol=1e-7):
-                raise ValueError(f"Conflicting marker observations for camera {iid}")
+                raise ValueError(f"Conflicting GCP observations for camera {iid}")
             if old_pin or not pinned:
                 continue
         observations[iid] = (uv, pinned)
@@ -761,7 +765,7 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
               for i, (c, s) in (cam_priors or {}).items() if i in ipos]
     n_cam = 6 * nI + nk * nC                     # reduced (camera side) system size
     log(f"GCP bundle adjustment: {nI} cameras, {nC} camera group(s), {nT:,} tie points "
-        f"({len(t_pt):,} projections), {nM} markers ({len(m_pt)} projections, {len(ctrl)} control), "
+        f"({len(t_pt):,} projections), {nM} GCPs ({len(m_pt)} projections, {len(ctrl)} control), "
         f"{len(priors)} camera GPS priors, intrinsics: {o['intrinsics'] if nk else 'fixed'}")
 
     observation_models = camera_models[cam_of_img[o_img]]
@@ -896,7 +900,7 @@ def gcp_bundle_adjust(model, markers_model_obs, control, opts=None, log=print, c
     log(f"  stopped: {why}")
     rr, _ = residuals(R, C, K, X)
     nt = len(t_pt)
-    log(f"  chi2: tie projections {np.sum(rr[:nt] ** 2):.4g} (n={nt}), marker projections "
+    log(f"  chi2: tie projections {np.sum(rr[:nt] ** 2):.4g} (n={nt}), GCP projections "
         f"{np.sum(rr[nt:] ** 2):.4g} (n={nO - nt}), control coordinates "
         f"{sum((((X[p] - ref) / s_) ** 2).sum() for p, ref, s_ in ctrl):.4g} (n={len(ctrl)})")
     log(f"  cost {c0:.4g} -> {cur:.4g} in {it} LM iterations, {time.perf_counter() - t_start:.1f} s")
@@ -1083,7 +1087,7 @@ def validate_control_reference(marker, crs):
         crs.to_metric(np.asarray(marker.ref, float).reshape(1, 3))
     except (TypeError, ValueError) as error:
         raise ValueError(
-            f"Control marker '{marker.label}' has invalid XYZ for {crs.name}. "
+            f"GCP '{marker.label}' has invalid XYZ for {crs.name}. "
             "Check coordinate order, units and height. "
             f"{error}") from error
 
@@ -1158,7 +1162,7 @@ def run_local_task(cfg, log=print):
         try:
             X, pixel, n = marker_observation_diagnostic(model, m)
         except (ValueError, np.linalg.LinAlgError) as error:
-            log(f"Marker {m.label}: residual unavailable ({error})")
+            log(f"GCP {m.label}: residual unavailable ({error})")
             X, pixel, n = None, None, 0
         est[m.label] = {"est": (X + offset).tolist() if X is not None else None, "n": n, "pix": pixel}
     backup = mdir.rstrip("/\\") + "_original"
@@ -1178,7 +1182,7 @@ def run_local_task(cfg, log=print):
     if cfg.get("result"):
         with open(cfg["result"], "w", encoding="utf-8") as f:
             json.dump(out, f, indent=1, default=float)
-    log(f"Reference use: marker image observations={len(obs)}, marker XYZ controls=0, camera GPS=0.")
+    log(f"Reference use: GCP image observations={len(obs)}, GCP XYZ controls=0, camera GPS=0.")
     log("Cameras optimized in the existing frame; no georeferencing was performed. "
         "Rebuild dense products to use the optimized cameras.")
     return out
@@ -1228,7 +1232,7 @@ def run_task(cfg, log=print):
     control = [m for m in markers if m.enabled and m.ref is not None and m.label in tri]
     for marker in control:
         validate_control_reference(marker, crs)
-    log(f"Markers: {len(markers)} imported, {len(tri)} with >=2 projections on aligned photos, "
+    log(f"GCPs: {len(markers)} imported, {len(tri)} with >=2 projections on aligned photos, "
         f"{len(control)} control, {sum(1 for m in markers if not m.enabled and m.label in tri)} check")
     # ---- initial similarity
     zone_hint=None
@@ -1240,9 +1244,9 @@ def run_task(cfg, log=print):
     marker_heights = cfg.get('marker_height_reference', 'unknown')
     if cfg.get('use_cameras') and gps and crs.kind != 'local' and control and cfg.get('use_markers', True):
         if cfg.get('strict_heights') and 'unknown' in (camera_heights, marker_heights):
-            raise ValueError('Confirm the camera and control height references before combining GPS with control markers; no vertical-datum conversion is automatic')
+            raise ValueError('Confirm the camera and control height references before combining GPS with GCPs; no vertical-datum conversion is automatic')
         if camera_heights != 'unknown' and marker_heights != 'unknown' and camera_heights != marker_heights:
-            raise ValueError('Camera and control heights use different references; convert them before combining GPS and markers')
+            raise ValueError('Camera and control heights use different references; convert them before combining GPS and GCPs')
     if cfg.get('adjustment_frame') == 'enu':
         if crs.kind not in ('wgs84', 'utm'):
             raise ValueError('ENU adjustment requires WGS84 geographic or UTM reference coordinates')
@@ -1260,16 +1264,21 @@ def run_task(cfg, log=print):
     metric = lambda xyz: crs.to_metric(np.atleast_2d(xyz), zone_hint, frame)[0]
     cam_gps = camera_gps_metric(model, gps, crs, zone_hint, frame) if cfg.get("use_cameras") else {}
     use_markers = cfg.get("use_markers", True)
+    if cfg.get("require_gcps") and len(control) < 3:
+        raise ValueError(f"Only {len(control)} GCPs could be triangulated after reconstruction. "
+                         "At least three GCPs with measurements on two aligned photos each are required.")
+    if cfg.get("require_camera_gps") and len(cam_gps) < 3:
+        raise ValueError(f"Only {len(cam_gps)} aligned photos have usable GPS. At least three are required.")
     if use_markers and len(control) >= 3:
         src = np.array([tri[m.label] for m in control]); dst = np.array([metric(m.ref) for m in control])
-        what = "control markers"
+        what = "GCPs"
     elif len(cam_gps) >= 3:
         ids = sorted(cam_gps)
         src = np.array([model.images[i].center() for i in ids]); dst = np.array([cam_gps[i] for i in ids])
         what = "camera GPS"
     else:
         refs = sum(m.enabled and m.ref is not None for m in markers)
-        raise ValueError(f"Cannot georeference: {len(markers)} markers imported, {refs} enabled with XYZ, "
+        raise ValueError(f"Cannot georeference: {len(markers)} GCPs imported, {refs} enabled with XYZ, "
                          f"{len(control)} triangulated controls, {len(cam_gps)} usable camera GPS positions. "
                          "Need 3 non-collinear controls with XYZ and placements on at least 2 aligned photos each, "
                          "or 3 camera GPS positions in a geographic/UTM CRS. "
@@ -1278,9 +1287,9 @@ def run_task(cfg, log=print):
         raise ValueError("Reference positions are collinear; use at least 3 non-collinear control positions.")
     offset = np.asarray(cfg.get("offset") or np.round(dst.mean(0), -2), float)
     s, R, t, inl = robust_helmert(src, dst - offset)
-    if what == "control markers" and inl.sum() < len(inl):
+    if what == "GCPs" and inl.sum() < len(inl):
         bad = [control[i].label for i in np.flatnonzero(~inl)]
-        log(f"Helmert: {len(bad)} control marker(s) look inconsistent (still used in BA with their accuracy): {', '.join(bad)}")
+        log(f"Helmert: {len(bad)} GCP(s) look inconsistent (still used in BA with their accuracy): {', '.join(bad)}")
     res_h = np.linalg.norm(apply_sim((s, R, t), src) - (dst - offset), axis=1)
     log(f"Helmert fit to {what}: scale {s:.6g}, RMS {np.sqrt(np.mean(res_h ** 2)):.4f} m over {len(src)} points")
     transform_model(model, s, R, t)
@@ -1322,8 +1331,8 @@ def run_task(cfg, log=print):
                                                      "max_iterations": cfg.get("max_iterations", 30),
                                                      "verbose": cfg.get("verbose", False)},
                                   log=log, cam_priors=pri)
-    log(f"Reference use: marker image observations={len(obs) if cfg.get('bundle', True) else 0}, "
-        f"marker XYZ controls={len(control) if use_markers else 0}, camera GPS={len(cam_gps)}.")
+    log(f"Reference use: GCP image observations={len(obs) if cfg.get('bundle', True) else 0}, "
+        f"GCP XYZ controls={len(control) if use_markers else 0}, camera GPS={len(cam_gps)}.")
     # ---- final marker estimates: re-triangulate with optimised cameras
     model_heights = marker_heights if control else camera_heights
     compare_heights = not (frame and marker_heights != 'ellipsoidal')
@@ -1332,7 +1341,7 @@ def run_task(cfg, log=print):
     est, pix, cnt, rows = marker_diagnostics(model, markers, crs, offset, zone_hint, frame=frame,
                                           compare_heights=compare_heights)
     if not compare_heights and markers:
-        log('Marker XYZ residuals unavailable: marker and model height references are not confirmed compatible. Image residuals remain independent.')
+        log('GCP XYZ residuals unavailable: GCP and model height references are not confirmed compatible. Image residuals remain independent.')
     # ---- commit transactionally: build every output in temporary files first,
     # so a failure leaves the model AND the point cloud / mesh in the old frame
     M = sim_matrix(s, R, t)

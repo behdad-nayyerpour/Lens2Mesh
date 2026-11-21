@@ -92,10 +92,10 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
         def addSeparator(self): pass
         def exec(self,*args):
             actions.extend(a.text() for a in self.items)
-            next(a for a in self.items if a.text()=="Select Marker: G1").trigger()
+            next(a for a in self.items if a.text()=="Select GCP: G1").trigger()
     monkeypatch.setattr(orthoview,"QMenu",TestMenu)
     view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse,QPoint(20,20),QPoint(20,20)))
-    assert actions == ["Select Marker: G1","Copy Coordinates","Reset View"]
+    assert actions == ["Select GCP: G1","Copy Coordinates","Reset View"]
     assert window.markers_pane.current_label() == "G1"
     assert ch.markers == before and len(window._mk_undo) == history
 
@@ -125,7 +125,7 @@ def test_optimize_preflight_offers_local_mode_explicitly(window, tmp_path, monke
     monkeypatch.setattr(QMessageBox, "question", question)
     monkeypatch.setattr(window, "_run", lambda *a, **k: ran.append((a, k)))
     window.optimize_cameras()
-    assert "94 markers imported" in prompts[0]
+    assert "94 GCPs imported" in prompts[0]
     assert "0 usable controls" in prompts[0]
     assert bool(ran) is accept
     assert not ch.georef

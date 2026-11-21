@@ -409,7 +409,7 @@ def test_model_context_menu_can_only_select_a_marker(window,tmp_path,monkeypatch
             self.items[0].trigger()
     monkeypatch.setattr(QtWidgets,"QMenu",Menu)
     view._context(QPoint(10,10))
-    assert actions == ["Select Marker: "+label]
+    assert actions == ["Select GCP: "+label]
     assert window.markers_pane.current_label() == label
     assert window.dataset.markers == before and len(window._mk_undo) == history
 

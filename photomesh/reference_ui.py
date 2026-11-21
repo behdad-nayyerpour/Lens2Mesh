@@ -93,10 +93,6 @@ class ReferenceMixin:
     def _marker_objs(self):
         return [g.Marker(**m) for m in (self.dataset.markers or [])]
 
-    def _snap(self):
-        if hasattr(self, "_markers_snapshot"):
-            self._markers_snapshot()              # Edit > Undo restores the previous markers
-
     def _invalidate_marker_error_rows(self, markers):
         """Recompute edited residuals in the current frame; never keep old error rows."""
         georef = self.dataset.georef
@@ -118,22 +114,12 @@ class ReferenceMixin:
                 georef.get("offset"), georef.get("zone"), cache=self._marker_residual_cache[1], frame=georef.get("coordinate_frame"),
                 compare_heights=georef.get('reference_heights_verified', True))
         except (ValueError, np.linalg.LinAlgError) as error:
-            self.log(f"Marker residuals unavailable after edit: {error}")
+            self.log(f"GCP residuals unavailable after edit: {error}")
             return
         georef.update(rows=rows, control_rmse=g.rmse(rows, "control"), check_rmse=g.rmse(rows, "check"))
         georef['marker_image_errors'] = {label: {'pix': pixel, 'n': counts.get(label, 0)} for label, pixel in pixels.items()}
         for marker in markers:
             marker.est = estimates[marker.label].tolist() if marker.label in estimates else None
-
-    def _store_markers(self, ms):
-        self._invalidate_marker_error_rows(ms)
-        self.dataset.markers = [m.to_dict() for m in ms]
-        self.set_modified()
-        if hasattr(self, "_refresh_markers_pane"):
-            self._refresh_markers_pane()
-        else:
-            self.markers_pane.refresh(self.dataset)
-        self._update_view_markers()
 
     def _marker_model_xyz(self, m, model, names):
         """Marker position in the model frame: reference (if georeferenced),
@@ -257,19 +243,19 @@ class ReferenceMixin:
         if stem is None:
             return
         ms = self._marker_objs()
-        self._snap()
+        self._markers_snapshot()
         for m in ms:
             if m.label == label:
                 m.projections = {a: b for a, b in m.projections.items() if g._stem(a) != stem}
-        self._store_markers(ms)
+        self._commit_markers(ms)
 
     def toggle_marker(self, label, enabled):
         ms = self._marker_objs()
-        self._snap()
+        self._markers_snapshot()
         for m in ms:
             if m.label == label:
                 m.enabled = enabled
-        self._store_markers(ms)
+        self._commit_markers(ms)
 
     def add_marker(self):
         ms = self._marker_objs()
@@ -277,36 +263,36 @@ class ReferenceMixin:
         labels = {m.label for m in ms}
         while f"point {n}" in labels:
             n += 1
-        self._snap()
+        self._markers_snapshot()
         ms.append(g.Marker(label=f"point {n}"))
-        self._store_markers(ms)
+        self._commit_markers(ms)
 
     # ------------------------------------------------------------ import / export
     def import_markers(self, path=None):
         path = path or QFileDialog.getOpenFileName(
-            self, "Import Markers / Reference", "",
-            "Markers and reference (*.xml *.txt *.csv);;All files (*)")[0]
+            self, "Import GCPs / Reference", "",
+            "GCPs and reference (*.xml *.txt *.csv);;All files (*)")[0]
         if not path:
             return
         try:
             new, crs = g.import_markers(path)
         except Exception as e:
-            QMessageBox.warning(self, "Import Markers", f"Cannot read {path}:\n{e}"); return
+            QMessageBox.warning(self, "Import GCPs", f"Cannot read {path}:\n{e}"); return
         ms = g.merge_markers(self._marker_objs(), new)
         if crs is not None and (crs.kind != "local" or not self.dataset.crs):
             self.dataset.crs = crs.name if crs.kind != "local" else 'LOCAL_CS["Local Coordinates (m)"]'
-        self._store_markers(ms)
+        self._commit_markers(ms)
         nproj = sum(len(m.projections) for m in new)
-        self.log(f"Imported {len(new)} markers ({nproj} photo projections) from {path}; "
+        self.log(f"Imported {len(new)} GCPs ({nproj} photo projections) from {path}; "
                  f"coordinate system: {crs.name if crs else 'unknown'}")
         self._show_dock("Markers", True)
 
     def export_markers(self):
         rows = (self.dataset.georef or {}).get("rows")
         if not self.dataset.markers:
-            QMessageBox.information(self, "Export Markers", "No markers."); return
-        dst = QFileDialog.getSaveFileName(self, "Export Markers", "markers.txt",
-                                          "Reference report (*.txt);;Markers XML (*.xml)")[0]
+            QMessageBox.information(self, "Export GCPs", "No GCPs."); return
+        dst = QFileDialog.getSaveFileName(self, "Export GCPs", "gcps.txt",
+                                          "Reference report (*.txt);;GCPs (Markers XML format) (*.xml)")[0]
         if not dst:
             return
         if dst.lower().endswith(".xml"):
@@ -321,7 +307,7 @@ class ReferenceMixin:
                     for m in self._marker_objs():
                         r = m.ref or ["", "", ""]
                         f.write(f"{m.label}\t{r[0]}\t{r[1]}\t{r[2]}\t{int(m.enabled)}\t{len(m.projections)}\n")
-        self.log(f"Exported markers to {dst}")
+        self.log(f"Exported GCPs to {dst}")
 
     # ------------------------------------------------------------ optimize
     def optimize_cameras(self):
@@ -395,13 +381,13 @@ class ReferenceMixin:
                     f"{status['usable']} usable control points. To fit the local grid, pin at least "
                     "three non-collinear controls with XYZ on two or more aligned photos each.")
                 return
-            msg = (f"{status['imported']} markers imported; {status['references']} enabled with complete XYZ; "
+            msg = (f"{status['imported']} GCPs imported; {status['references']} enabled with complete XYZ; "
                    f"{status['usable']} usable controls on at least two aligned photos; "
                    f"{status['gps']} camera GPS positions usable in the selected CRS.\n\n"
                    "Georeferencing needs at least 3 non-collinear controls or camera GPS positions. "
                    "Imported XYZ alone is insufficient: place each control on at least two aligned photos.\n\n"
                    "Optimize cameras in the existing frame instead? This uses tie points" +
-                   (" and enabled control-marker image observations" if s["use_markers"] else "") +
+                   (" and enabled GCP image observations" if s["use_markers"] else "") +
                    ", ignores reference coordinates and GPS, and does not georeference the model.")
             if not s["bundle"]:
                 QMessageBox.information(self, "Optimize Cameras", msg +
@@ -425,9 +411,8 @@ class ReferenceMixin:
                 products_after_georef(ch, res["similarity"], self.log)
             self._invalidate_camera_products(ch)
             if not res.get("local_only"):
-                ch.georef = {k: res.get(k) for k in ("offset", "similarity", "crs", "crs_kind", "zone", "rows",
-                                                     "control_rmse", "check_rmse", "coordinate_frame", "height_reference",
-                                                     "camera_height_reference", "marker_height_reference", "reference_heights_verified", "marker_image_errors")}
+                from .alignment_reference import GEOREF_FIELDS
+                ch.georef = {k: res.get(k) for k in GEOREF_FIELDS}
                 ch.crs = res.get("crs") or ch.crs
                 for r in ch.georef.get("rows") or []:
                     r["pix"] = ((res.get("markers") or {}).get(r["label"]) or {}).get("pix")
@@ -447,7 +432,7 @@ class ReferenceMixin:
             ch.markers = [m.to_dict() for m in ms]
             self._reload_alignment(ch, wd)
             if res.get("local_only") and ch.georef:
-                self._store_markers(self._marker_objs())
+                self._commit_markers(self._marker_objs())
             c, k = res.get("control_rmse"), res.get("check_rmse")
             msg = ("Cameras optimized in the existing frame. " if res.get("local_only") else "Georeferenced. ") + (f"Control RMSE {c['total']:.3f} m (n={c['n']}). " if c else "") + \
                 (f"Check RMSE {k['total']:.3f} m (n={k['n']})." if k else "")
@@ -509,16 +494,16 @@ class ReferenceMixin:
 
     # ------------------------------------------------------------ refine
     def refine_markers(self):
-        if not self._require_saved("Refine Markers"):
+        if not self._require_saved("Refine GCPs"):
             return None
         ch = self.dataset
         if not ch.markers or not os.path.isdir(self._model_dir()):
-            QMessageBox.information(self, "Refine Markers", "Align photos and import markers first."); return
+            QMessageBox.information(self, "Refine GCPs", "Align photos and import GCPs first."); return
         from .photonames import photo_dimensions
         try:
             g.validate_projection_dimensions(self._sparse_model(), photo_dimensions(ch))
         except ValueError as error:
-            QMessageBox.information(self, "Refine Markers", str(error)); return
+            QMessageBox.information(self, "Refine GCPs", str(error)); return
         wd = self.project.default_workdir(ch)
         cfg = {"model": self._model_dir(), "image_root": cm.image_dir(wd), "markers": [m for m in ch.markers if not m.get("disabled", False) and not m.get("locked", False)],
                "offset": (ch.georef or {}).get("offset"), "use_reference": bool(ch.georef),
@@ -541,9 +526,9 @@ class ReferenceMixin:
                     if how in ("saddle", "template"):
                         m.projections.pop(cur.get(stem, stem), None)
                         m.projections[stem] = [u, v, False, "refined"]; n += 1
-            self._store_markers(ms)
-            self.log(f"Refine Markers: {n} projections placed/refined (unpinned; pinned ones untouched)")
-        self._run("Refine Markers", [("Placing markers", [cm.PYTHON, "refine_markers", path], 100)], loaded)
+            self._commit_markers(ms)
+            self.log(f"Refine GCPs: {n} projections placed/refined (unpinned; pinned ones untouched)")
+        self._run("Refine GCPs", [("Placing GCPs", [cm.PYTHON, "refine_markers", path], 100)], loaded)
 
     # ------------------------------------------------------------ point cloud filtering
     def filter_point_cloud(self, confidence_only=False):

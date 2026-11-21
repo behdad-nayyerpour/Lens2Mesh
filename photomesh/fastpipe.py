@@ -656,6 +656,39 @@ def model_num_images(model_dir):
     return 0
 
 
+def _select_primary_model(out):
+    """Select the largest valid connected reconstruction without dropping alternatives."""
+    import struct
+    from pathlib import Path
+    from uuid import uuid4
+    from .engine import validate_model
+
+    root = Path(out)
+    primary = root / "0"
+    candidates = [path for path in root.glob("*") if path.is_dir() and path.name.isdecimal()]
+    if not candidates or candidates == [primary]:
+        return []
+    ranked = sorted(candidates, key=lambda path: (-model_num_images(path), int(path.name)))
+    for folder in ranked:
+        try:
+            model = validate_model(folder)
+        except (OSError, ValueError, EOFError, IndexError, struct.error):
+            continue
+        if folder == primary:
+            return []
+        former = root / f"alternate-primary-{uuid4().hex[:8]}"
+        if primary.exists():
+            primary.rename(former)
+        try:
+            folder.rename(primary)
+        except OSError:
+            if former.exists():
+                former.rename(primary)
+            raise
+        return [("log", f"Selected reconstruction {folder.name} with {len(model.images)} registered photos.", 0)]
+    return []  # existing validation/fallback handles an unusable mapper result
+
+
 def filter_step(exe, model):
     """Remove tie points with large reprojection error / tiny triangulation
     angle after the final bundle adjustment (as COLMAP's mapper does). This
@@ -730,18 +763,20 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
         os.makedirs(resumed_out,exist_ok=True)
         inc[inc.index('--output_path')+1]=resumed_out
     label = f"Estimating camera locations{tag}"
+    select_primary = ("Selecting primary reconstruction", lambda: _select_primary_model(out), 0)
 
     def fallback():
         import shutil
         shutil.rmtree(out, ignore_errors=True); os.makedirs(out, exist_ok=True)
         return [("log", "falling back to the incremental mapper", 0),
-                (label + " - incremental", inc, 25)]
+                (label + " - incremental", inc, 25), select_primary]
     if kind == "Global":
         from .engine import global_arguments
         integrated = global_arguments(exe, s, db, img_dir, out, coarse=coarse)
         if integrated is not None:
             return [("log", f"Mapper: integrated COLMAP global on {n_images} images", 0),
                     (label + " - global", Try(integrated, fallback), 25),
+                    select_primary,
                     ("Checking global model", _check_model(out, n_images, fallback), 0)]
         # GLOMAP 1.2 reading a COLMAP 3.8 database aborts in its final
         # re-triangulation (frame/rig check, legacy DB has no frames), so that
@@ -755,6 +790,7 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
             g[4:4] = ["--image_path", img_dir]
         steps = [("log", f"Mapper: global (GLOMAP) on {n_images} images", 0),
                  (label + " - global", Try(g, fallback), 25),
+                 select_primary,
                  (f"Checking {tag.strip(' ()') or 'model'}", _check_model(out, n_images, fallback), 0)]
         if not coarse:
             steps.append(("Re-triangulating global model", _retriangulate(exe, db, img_dir, out), 0))
@@ -768,8 +804,10 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
         h += opt(exe, "hierarchical_mapper", ["Mapper.ba_global_max_refinements"], 2)
         return [("log", f"Mapper: hierarchical (parallel sub-models) on {n_images} images", 0),
                 (label + " - hierarchical", Try(h, fallback), 25),
+                select_primary,
                 (f"Checking {tag.strip(' ()') or 'model'}", _check_model(out, n_images, fallback), 0)]
-    return [("log", f"Mapper: incremental on {n_images} images", 0), (label + " - incremental", inc, 25)]
+    return [("log", f"Mapper: incremental on {n_images} images", 0),
+            (label + " - incremental", inc, 25), select_primary]
 
 
 def _retriangulate(exe, db, img_dir, out):

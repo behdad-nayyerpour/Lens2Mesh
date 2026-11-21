@@ -1,6 +1,6 @@
-"""Manual ground control: Add Marker on a photo / on the 3D surface, prediction
+"""Manual ground control: Add GCP on a photo / on the 3D surface, prediction
 into the other photos, editable Markers table with validation + undo, Rename /
-Remove, Filter Photos by Markers, Ctrl+click pinning, Refine/Optimize inputs."""
+Remove, Filter Photos by GCPs, Ctrl+click pinning, Refine/Optimize inputs."""
 import json
 import os
 
@@ -93,7 +93,14 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
 
     monkeypatch.setattr(panes, "QMenu", InspectableMenu)
     pane._menu(QPoint(0, 0))
-    assert menu_actions == ["Add Marker", "Rename Marker...", "Remove Markers"]
+    assert menu_actions == ["Add GCP", "Rename GCP...", "Remove GCPs"]
+    assert buttons["Clear auto placements"].isEnabled()
+    buttons["Clear auto placements"].click()
+    assert set(_marker(window, "P12")["projections"]) == {"img_0001", "other"}
+    assert pane.item(0, 10).text() == "0"
+    assert not buttons["Clear auto placements"].isEnabled()
+    assert window.undo_markers()
+    assert _marker(window, "P12")["projections"]["img_0002"][3] == "refined"
 
 
 def test_add_marker_on_photo_pins_and_predicts_other_photos(window, tmp_path):
@@ -174,13 +181,13 @@ def test_markers_table_edits_validate_and_undo(window, tmp_path):
     assert window.edit_marker_cell(lab, 4, "0.02/0.05") and _marker(window, lab)["acc"] == [0.02, 0.05]
     assert window.edit_marker_cell(lab, 4, "-1") is False and _marker(window, lab)["acc"] == [0.02, 0.05]
     assert window.edit_marker_cell(lab, 4, "") and _marker(window, lab)["acc"] is None
-    window.add_marker()                                           # Tools > Markers > Add Marker -> point 2
+    window.add_marker()                                           # Tools > Markers > Add GCP -> point 2
     assert window.edit_marker_cell(lab, 0, "point 2") is False    # duplicate label
     assert window.edit_marker_cell(lab, 0, "  ") is False         # empty label
     assert window.edit_marker_cell(lab, 0, "GCP 7")
     assert [m["label"] for m in window.dataset.markers] == ["GCP 7", "point 2"]
     assert window.undo_markers() and [m["label"] for m in window.dataset.markers] == [lab, "point 2"]
-    assert window.undo_markers() and len(window.dataset.markers) == 1        # Add Marker undone
+    assert window.undo_markers() and len(window.dataset.markers) == 1        # Add GCP undone
     assert window.redo_markers() and len(window.dataset.markers) == 2
     window.actions["Edit/Undo"].trigger()                          # Edit > Undo is wired
     assert len(window.dataset.markers) == 1
@@ -211,17 +218,17 @@ def test_rename_remove_filter_and_workspace_menu(window, tmp_path):
     assert window.rename_marker(a, "G1") and window.rename_marker(b, "G2")
     shown = window.filter_photos_by_markers(["G1"])
     assert shown == {0, 1} and window.photos.visible_indices() == [0, 1]
-    window._workspace_action("marker:Filter Photos by Markers:G2", window.project.active)
+    window._workspace_action("marker:Filter Photos by GCPs:G2", window.project.active)
     assert window.photos.visible_indices() == [1, 2]
     window._workspace_action("marker:Reset Filter:", window.project.active)
     assert window.photos.visible_indices() == [0, 1, 2]
-    window._workspace_action("marker:Remove Marker:G1", window.project.active)
+    window._workspace_action("marker:Remove GCP:G1", window.project.active)
     assert [m["label"] for m in window.dataset.markers] == ["G2"]
     assert window.undo_markers() and [m["label"] for m in window.dataset.markers] == ["G1", "G2"]
     assert window.remove_markers(["G1", "G2"], confirm=False) == 2 and window.dataset.markers == []
     rows = []
     window.workspace.refresh(window.project)
-    assert not any(it.text(0).startswith("Markers (") for it in window.workspace._iter())
+    assert not any(it.text(0).startswith("GCPs (") for it in window.workspace._iter())
 
 
 def test_photo_flags_kinds_ctrl_click_and_context(window, tmp_path):
@@ -254,7 +261,7 @@ def test_refine_and_optimize_inputs_include_new_markers(window, tmp_path, monkey
     ran = []
     monkeypatch.setattr(window, "_run", lambda name, steps, *a, **k: ran.append((name, steps)))
     window.refine_markers()
-    assert ran and ran[0][0] == "Refine Markers"
+    assert ran and ran[0][0] == "Refine GCPs"
     cfg = json.load(open(os.path.join(window.project.default_workdir(ch), "refine_task.json")))
     assert any(m["label"] == lab and len(m["projections"]) == 2 for m in cfg["markers"])
     assert np.allclose(cfg["positions"][lab], [100, 100, 0], atol=1e-3)

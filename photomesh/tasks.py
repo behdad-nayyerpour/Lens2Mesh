@@ -118,7 +118,7 @@ def cmd_refine_markers(cfg):
             if p is None or not (40 <= p[0] < cam.width - 40 and 40 <= p[1] < cam.height - 40):
                 continue
             plan.setdefault(iid, []).append(((m.label, iid), p))
-    _log(f"{len(Xs)} markers predicted in {sum(len(v) for v in plan.values())} photo locations")
+    _log(f"{len(Xs)} GCPs predicted in {sum(len(v) for v in plan.values())} photo locations")
     views = mr.crop_views(model, cfg["image_root"], plan, radius=200)
     _log(f"Read {len(views)} photo crops ({time.perf_counter() - t0:.1f} s)")
     out = {}
@@ -136,7 +136,7 @@ def cmd_refine_markers(cfg):
     with open(cfg["output"], "w", encoding="utf-8") as f:
         json.dump(out, f)
     n = sum(len(v) for v in out.values())
-    _log(f"Placed {n} marker projections in {time.perf_counter() - t0:.1f} s")
+    _log(f"Placed {n} GCP projections in {time.perf_counter() - t0:.1f} s")
 
 
 def _result(cfg, info):

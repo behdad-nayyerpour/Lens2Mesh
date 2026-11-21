@@ -107,8 +107,8 @@ LAYERS = [
     ("dtm", "DTM", False),
     ("cameras", "Cameras", True),
     ("camera_labels", "Camera Labels", False),
-    ("markers", "Markers", True),
-    ("marker_labels", "Marker Labels", True),
+    ("markers", "GCPs", True),
+    ("marker_labels", "GCP Labels", True),
     ("shapes", "Shapes", True),
     ("grid", "Grid", True),
     ("region", "Region", False),
@@ -697,7 +697,7 @@ class ModelView(QWidget):
         if not label:
             return
         menu = QMenu(self)
-        menu.addAction(f"Select Marker: {label}").triggered.connect(
+        menu.addAction(f"Select GCP: {label}").triggered.connect(
             lambda: self.markerAction.emit("select", label))
         menu.exec((self.gl or self).mapToGlobal(pos))
 
@@ -1403,14 +1403,14 @@ class PhotoView(QWidget):
             return
         p = self.view.mapToScene(pos)
         menu = QMenu(self)
-        a = menu.addAction("Add Marker")
-        a.setToolTip("New marker pinned here, predicted on the other photos (Ctrl+click)")
+        a = menu.addAction("Add GCP")
+        a.setToolTip("New GCP pinned here, predicted on the other photos (Ctrl+click)")
         a.triggered.connect(lambda: self.addMarker.emit(p.x(), p.y()))
         if self.active_marker:
-            a = menu.addAction(f"Place Marker '{self.active_marker}' Here")
+            a = menu.addAction(f"Place GCP '{self.active_marker}' Here")
             a.triggered.connect(lambda: self.placeMarker.emit(p.x(), p.y()))
         if self.available_markers:
-            existing = menu.addMenu("Place Existing Marker")
+            existing = menu.addMenu("Place Existing GCP")
             for label in self.available_markers:
                 action = existing.addAction(str(label))
                 action.triggered.connect(
@@ -1422,7 +1422,7 @@ class PhotoView(QWidget):
         for m in near:
             marker_menu(menu, m[0], lambda action, lab: self.markerAction.emit(action, lab))
             if m[3] != "predicted":
-                a = menu.addAction(f"Remove Marker '{m[0]}' from this Photo")
+                a = menu.addAction(f"Remove GCP '{m[0]}' from this Photo")
                 a.triggered.connect(lambda _=False, lab=m[0]: self.removeMarker.emit(lab))
         menu.exec(self.view.mapToGlobal(pos))
 

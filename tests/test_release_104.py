@@ -336,7 +336,7 @@ def test_photo_context_can_place_existing_marker_without_selection(window, image
         menu = QApplication.activePopupWidget()
         assert menu is not None
         existing = next(action.menu() for action in menu.actions()
-                        if action.menu() and action.text() == "Place Existing Marker")
+                        if action.menu() and action.text() == "Place Existing GCP")
         next(action for action in existing.actions() if action.text() == "G2").trigger()
         menu.close()
     QTimer.singleShot(0, choose)

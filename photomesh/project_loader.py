@@ -36,7 +36,7 @@ def prepare_project(path, report, cancelled):
         try:
             markers = context._marker_positions()
         except (OSError, ValueError, RuntimeError) as error:
-            notes.append(f"Marker display could not be prepared: {error}")
+            notes.append(f"GCP display could not be prepared: {error}")
     if cancelled():
         return None
     ambiguous = photo_map(dataset)[1]

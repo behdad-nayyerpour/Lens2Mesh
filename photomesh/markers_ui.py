@@ -100,7 +100,7 @@ class MarkerEditMixin:
             return False
         self._markers_snapshot()
         m.disabled = action == "ignore"
-        self._commit_markers(ms, f"Marker {label}: {action}")
+        self._commit_markers(ms, f"GCP {label}: {action}")
         return True
 
     # ------------------------------------------------------------ state / undo
@@ -130,14 +130,14 @@ class MarkerEditMixin:
             self.statusBar().showMessage("Nothing to undo", 3000); return False
         self._mk_redo.append((copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending)))
         self._restore_markers(self._mk_undo.pop())
-        self.log("Undo: markers restored"); return True
+        self.log("Undo: GCPs restored"); return True
 
     def redo_markers(self):
         if not self._mk_redo:
             self.statusBar().showMessage("Nothing to redo", 3000); return False
         self._mk_undo.append((copy.deepcopy(self.dataset.markers or []), copy.deepcopy(self._ref_pending)))
         self._restore_markers(self._mk_redo.pop())
-        self.log("Redo: markers restored"); return True
+        self.log("Redo: GCPs restored"); return True
 
     def _refresh_markers_pane(self):
         self.markers_pane.pending = self._ref_pending
@@ -148,9 +148,7 @@ class MarkerEditMixin:
         self._invalidate_marker_error_rows(ms)
         self.dataset.markers = [m.to_dict() for m in ms]
         self.set_modified()
-        self._refresh_markers_pane()
         self._update_view_markers()
-        self.workspace.refresh(self.project) if hasattr(self, "workspace") else None
         if msg:
             self.log(msg)
 
@@ -220,7 +218,7 @@ class MarkerEditMixin:
             sc = o3d.t.geometry.RaycastingScene()
             sc.add_triangles(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32)))
         except Exception as e:  # noqa: BLE001
-            self.log(f"Add Marker: no mesh ray casting ({e})"); return None
+            self.log(f"Add GCP: no mesh ray casting ({e})"); return None
         occ.update(key=key, scene=sc)
         return sc
 
@@ -339,11 +337,11 @@ class MarkerEditMixin:
         if camera.width and camera.height:
             valid = valid and 0 <= u < camera.width and 0 <= v < camera.height
         if not valid:
-            self._marker_error("Place Marker", "Choose a finite position inside the source photograph.")
+            self._marker_error("Place GCP", "Choose a finite position inside the source photograph.")
         return bool(valid)
 
     def add_marker_at_photo(self, u, v, k=None, label=None):
-        """Photo tab > right-click > Add Marker: new marker pinned at (u, v) on
+        """Photo tab > right-click > Add GCP: new marker pinned at (u, v) on
         photo k (no active marker needed), predicted on the other photos."""
         k = self.current_photo if k is None else k
         if not (0 <= k < len(self.dataset.cameras)):
@@ -354,7 +352,7 @@ class MarkerEditMixin:
         label = label or self._new_label(ms)
         stem = self._photo_marker_key(k)
         if stem is None:
-            self._marker_error("Place Marker", "Photo identity is ambiguous; repair aliases before marking.")
+            self._marker_error("Place GCP", "Photo identity is ambiguous; repair aliases before marking.")
             return None
         X, src = None, None
         ray = self.photo_pixel_ray(k, u, v)
@@ -367,7 +365,7 @@ class MarkerEditMixin:
         ms.append(m)
         where = (f"surface point from the {src}" if X is not None else
                  "no 3D position yet (place it on a second photo)" if ray is not None else "photo not aligned")
-        self._commit_markers(ms, f"Added marker {label}: pinned on {self.dataset.cameras[k].label} at "
+        self._commit_markers(ms, f"Added GCP {label}: pinned on {self.dataset.cameras[k].label} at "
                                  f"({u:.1f}, {v:.1f}); {where}; predicted on {len(pred)} other photos (unpinned)")
         self._select_marker_row(label)
         return label
@@ -410,12 +408,12 @@ class MarkerEditMixin:
             return False
         stem = self._photo_marker_key(k)
         if stem is None:
-            self._marker_error("Place Marker", "Photo identity is ambiguous; no observation was changed.")
+            self._marker_error("Place GCP", "Photo identity is ambiguous; no observation was changed.")
             return False
         self._markers_snapshot()
         m.projections = {a: b for a, b in m.projections.items() if g._stem(a) != stem}
         m.projections[stem] = [float(u), float(v), True]
-        self._commit_markers(ms, f"Marker {label} pinned on {self.dataset.cameras[k].label} at ({u:.1f}, {v:.1f})")
+        self._commit_markers(ms, f"GCP {label} pinned on {self.dataset.cameras[k].label} at ({u:.1f}, {v:.1f})")
         return True
 
     def _select_marker_row(self, label):
@@ -429,7 +427,7 @@ class MarkerEditMixin:
     # ------------------------------------------------------------ rename / remove
     def rename_marker(self, old, new=None):
         if new is None:
-            new, ok = QInputDialog.getText(self, "Rename Marker", "Label:", text=old)
+            new, ok = QInputDialog.getText(self, "Rename GCP", "Label:", text=old)
             if not ok:
                 return False
         new = str(new).strip()
@@ -438,9 +436,9 @@ class MarkerEditMixin:
         if not new:
             err = "The label cannot be empty."
         elif new != old and any(m.label == new for m in ms):
-            err = f"A marker named '{new}' already exists."
+            err = f"A GCP named '{new}' already exists."
         if err:
-            self._marker_error("Rename Marker", err); return False
+            self._marker_error("Rename GCP", err); return False
         if new == old:
             return True
         self._markers_snapshot()
@@ -453,7 +451,7 @@ class MarkerEditMixin:
         for r in gr.get("rows") or []:
             if r.get("label") == old:
                 r["label"] = new
-        self._commit_markers(ms, f"Marker '{old}' renamed to '{new}'")
+        self._commit_markers(ms, f"GCP '{old}' renamed to '{new}'")
         return True
 
     def remove_markers(self, labels, confirm=True):
@@ -461,8 +459,8 @@ class MarkerEditMixin:
         if not labels:
             return 0
         if confirm and not getattr(self, "_headless", False):
-            txt = labels[0] if len(labels) == 1 else f"{len(labels)} markers"
-            if QMessageBox.question(self, "Remove Markers", f"Remove {txt}? (Edit > Undo restores it)") \
+            txt = labels[0] if len(labels) == 1 else f"{len(labels)} GCPs"
+            if QMessageBox.question(self, "Remove GCPs", f"Remove {txt}? (Edit > Undo restores it)") \
                     != QMessageBox.Yes:
                 return 0
         ms = self._marker_objs()
@@ -473,7 +471,7 @@ class MarkerEditMixin:
         self._markers_snapshot()
         for l in labels:
             self._ref_pending.pop(l, None)
-        self._commit_markers(keep, f"Removed {n} marker(s): {', '.join(labels[:10])}")
+        self._commit_markers(keep, f"Removed {n} GCP(s): {', '.join(labels[:10])}")
         if self._photo_filter:
             self.reset_photo_filter()
         return n
@@ -487,7 +485,7 @@ class MarkerEditMixin:
     # ------------------------------------------------------------ table edits
     def edit_marker_cell(self, label, col, text):
         """Markers table edit: col 0 label, 1-3 X/Y/Z, 4 accuracy. Returns True if applied."""
-        title = "Markers"
+        title = "Ground Control Point"
         try:
             if col == 0:
                 return self.rename_marker(label, text)
@@ -511,13 +509,13 @@ class MarkerEditMixin:
                 self._markers_snapshot()
                 if all(c is not None for c in cur):
                     m.ref = [float(c) for c in cur]; self._ref_pending.pop(label, None)
-                    msg = f"Marker {label}: reference set to {m.ref}"
+                    msg = f"GCP {label}: reference set to {m.ref}"
                 elif all(c is None for c in cur):
                     m.ref = None; self._ref_pending.pop(label, None)
-                    msg = f"Marker {label}: reference cleared"
+                    msg = f"GCP {label}: reference cleared"
                 else:
                     m.ref = None; self._ref_pending[label] = cur      # incomplete: not used until X, Y, Z set
-                    msg = f"Marker {label}: reference incomplete ({'XYZ'[col - 1]} set) - enter X, Y and Z"
+                    msg = f"GCP {label}: reference incomplete ({'XYZ'[col - 1]} set) - enter X, Y and Z"
                 self._commit_markers(ms, msg)
                 return True
             if col == 4:
@@ -526,7 +524,7 @@ class MarkerEditMixin:
                     return True
                 self._markers_snapshot()
                 m.acc = a
-                self._commit_markers(ms, f"Marker {label}: accuracy {a if a else 'default'}")
+                self._commit_markers(ms, f"GCP {label}: accuracy {a if a else 'default'}")
                 return True
         except ValueError as e:
             self._marker_error(title, f"'{text}' is not valid for {['label', 'X', 'Y', 'Z', 'accuracy'][col]}: {e}")
@@ -550,11 +548,11 @@ class MarkerEditMixin:
             labels = self.markers_pane.selected_labels()
         labels = [l for l in labels if l]
         if not labels:
-            self.statusBar().showMessage("Select one or more markers first", 4000); return set()
+            self.statusBar().showMessage("Select one or more GCPs first", 4000); return set()
         idx = self.marker_photo_indices(labels)
         self._photo_filter = (labels, idx)
         self.photos.set_filter(idx)
-        self.log(f"Photos filtered by markers {', '.join(labels[:10])}: {len(idx)} photos")
+        self.log(f"Photos filtered by GCPs {', '.join(labels[:10])}: {len(idx)} photos")
         if "Photos" in getattr(self, "docks", {}):
             self.docks["Photos"].raise_()
         return idx
@@ -563,16 +561,30 @@ class MarkerEditMixin:
         self._photo_filter = None
         self.photos.set_filter(None)
 
+    def clear_auto_placements(self, label):
+        points = self._marker_objs()
+        point = next((point for point in points if point.label == label), None)
+        if point is None:
+            return
+        retained = {name: value for name, value in point.projections.items() if not g.projection_is_refined(value)}
+        removed = len(point.projections) - len(retained)
+        if removed:
+            self._markers_snapshot()
+            point.projections = retained
+            self._commit_markers(points, f"GCP {label}: cleared {removed} automatic placements")
+            if self._photo_filter:
+                self.filter_photos_by_markers(self._photo_filter[0])
+
     def _marker_pane_action(self, action, labels):
-        if action == "Add Marker":
+        if action == "Add GCP":
             self.add_marker()
-        elif action == "Rename Marker..." and labels:
+        elif action == "Rename GCP..." and labels:
             self.rename_marker(labels[0])
-        elif action == "Remove Markers" and labels:
+        elif action == "Remove GCPs" and labels:
             self.remove_markers(labels)
-        elif action == "Filter Photos by Markers":
+        elif action == "Filter Photos by GCPs":
             self.filter_photos_by_markers(labels)
         elif action == "Reset Filter":
             self.reset_photo_filter()
-        elif action == "Show Marker" and labels:
-            self._goto_marker(labels[0])
+        elif action == "Clear auto placements" and len(labels) == 1:
+            self.clear_auto_placements(labels[0])

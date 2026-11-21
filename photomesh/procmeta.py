@@ -429,7 +429,7 @@ def properties(dataset, kind, index=None):
     if kind == "dataset":
         rows = [("ProjectData", dataset.name), ("Images", f"{len(dataset.cameras):,}"),
                 ("Aligned", f"{dataset.aligned_count():,}/{len(dataset.cameras):,}"),
-                ("Markers", f"{len(dataset.markers or []):,}"),
+                ("GCPs", f"{len(dataset.markers or []):,}"),
                 ("Tie points", fmt(dataset.tie_point_count or None)),
                 ("Coordinate system", gr.get("crs") or dataset.crs or "Local (not georeferenced)"),
                 ("Georeferenced", "Yes" if gr else "No"), ("Working folder", dataset.workdir or UNKNOWN)]
@@ -449,7 +449,7 @@ def properties(dataset, kind, index=None):
         return rows
     if kind == "markers":
         ms = dataset.markers or []
-        rows = [("Markers", f"{len(ms):,}"), ("Control", f"{sum(1 for m in ms if m.get('enabled', True)):,}"),
+        rows = [("GCPs", f"{len(ms):,}"), ("Control", f"{sum(1 for m in ms if m.get('enabled', True)):,}"),
                 ("Check", f"{sum(1 for m in ms if not m.get('enabled', True)):,}"),
                 ("Projections", f"{sum(len(m.get('projections', {})) for m in ms):,}")]
         for key, name in (("control_rmse", "Control points RMSE"), ("check_rmse", "Check points RMSE")):
