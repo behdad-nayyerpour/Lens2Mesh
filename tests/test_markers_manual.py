@@ -58,6 +58,7 @@ def _marker(window, label):
 def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, monkeypatch):
     from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QLabel, QMenu, QPushButton
+    from photomesh import panes
 
     ch = _scene(window, tmp_path)
     ch.markers = [g.Marker("P12", [100, 100, 0], projections={
@@ -85,7 +86,12 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
     assert window.photos.visible_indices() == [0, 1, 2]
 
     menu_actions = []
-    monkeypatch.setattr(QMenu, "exec", lambda menu, _pos: menu_actions.extend(a.text() for a in menu.actions()))
+
+    class InspectableMenu(QMenu):
+        def exec(self, _pos):
+            menu_actions.extend(action.text() for action in self.actions())
+
+    monkeypatch.setattr(panes, "QMenu", InspectableMenu)
     pane._menu(QPoint(0, 0))
     assert menu_actions == ["Add Marker", "Rename Marker...", "Remove Markers"]
 
