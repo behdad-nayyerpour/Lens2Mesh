@@ -292,7 +292,7 @@ class ReferenceMixin:
         if not self.dataset.markers:
             QMessageBox.information(self, "Export GCPs", "No GCPs."); return
         dst = QFileDialog.getSaveFileName(self, "Export GCPs", "gcps.txt",
-                                          "Reference report (*.txt);;GCPs (Markers XML format) (*.xml)")[0]
+                                          "Reference report (*.txt);;GCP XML (*.xml)")[0]
         if not dst:
             return
         if dst.lower().endswith(".xml"):
