@@ -7,13 +7,13 @@ def runner(monkeypatch, before=None, success=True):
     from photomesh import colmap as cm
 
     class Runner(QObject):
-        progress = Signal(int, str)
-        detail = Signal(str)
+        stepStarted = Signal(str)
+        stageProgress = Signal(object)
         log = Signal(str)
         finished = Signal(bool, str)
         failure = None
 
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             super().__init__()
 
         def start(self):

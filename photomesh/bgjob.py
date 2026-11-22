@@ -106,26 +106,21 @@ class BackgroundJob(QObject):
 
 
 def run_modal(parent, title, label, fn, total, min_duration_ms=0):
-    """A single task window, with overall and current-task progress."""
+    """Show the current stage of a single background operation."""
     from PySide6.QtWidgets import QApplication
     from .dialogs import ProgressDialog
+    from .progress import StageProgress
     job = BackgroundJob(fn, name=title)
     dlg = ProgressDialog(title, parent)
     dlg.log.hide()
-    dlg.stage.setText(label)
+    dlg.begin_stage(label)
     dlg.setWindowModality(Qt.WindowModal)
     dlg.cancel_btn.clicked.connect(job.cancel)
     loop = QEventLoop()
 
     def prog(done, count, text):
-        if count > 0:
-            fraction = min(1.0, max(0.0, done / count))
-            dlg.bar.setRange(0, 1000)
-            dlg.set_progress(100 * fraction, text or label)
-            dlg.set_stage_progress(fraction, text or label)
-        else:
-            dlg.bar.setRange(0, 0)
-            dlg.set_stage_progress(-1, text or label)
+        if not job.cancelled():
+            dlg.set_stage_progress(StageProgress(label, done, count, detail=text if text != label else ""))
     job.progress.connect(prog)
     job.done.connect(loop.quit)
     busy = getattr(parent, "busy_indicator", None)
@@ -140,6 +135,8 @@ def run_modal(parent, title, label, fn, total, min_duration_ms=0):
             loop.exec()
         job.wait()
         QApplication.processEvents()
+        if not job.error and not job.cancelled():
+            dlg.finish_success()
     finally:
         dlg.running = False
         dlg._timer.stop()

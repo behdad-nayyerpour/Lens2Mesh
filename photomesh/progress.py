@@ -1,24 +1,36 @@
-"""Progress meters for long COLMAP steps: smooth fraction, pass and ETA parsed
-from the tool's console output (PipelineRunner feeds every line).
-
-PatchMatchMeter  patch_match_stereo prints "Processing view i / N for <name>"
-                 once per computed view and pass: with geometric consistency
-                 first a photometric pass over all views, then a geometric one.
-                 Views whose maps already exist are skipped silently, so the
-                 expected counts are passed in (see dense.patch_match_meter).
-FusionMeter      stereo_fusion prints "Reading workspace...", then
-                 "Fusing image [k/N] with index i ... in 1.2s (123456 points)".
-"""
+"""Measured progress from native log events and validated intermediate files."""
 from __future__ import annotations
 
-import re
-import time
+from dataclasses import dataclass
 import math
+import re
 from statistics import median
+import time
 
-_VIEW = re.compile(r"Processing view\s+(\d+)\s*/\s*(\d+)")
-_FUSE = re.compile(r"Fusing image \[(\d+)/(\d+)\]")
-_POINTS = re.compile(r"\((\d+) points\)")
+
+@dataclass(frozen=True)
+class StageProgress:
+    label: str
+    done: int = 0
+    total: int = 0
+    unit: str = ""
+    estimate: bool = True
+    detail: str = ""
+
+    @property
+    def fraction(self):
+        # Finishing the counted work doesn't finish the phase or publish the result.
+        if self.estimate and 0 <= self.done < self.total:
+            return self.done / self.total
+        return None
+
+    @property
+    def count_text(self):
+        if self.total:
+            return f"{self.done:,}/{self.total:,} {self.unit}".strip()
+        if self.done:
+            return f"{self.done:,} {self.unit}".strip()
+        return ""
 
 
 def fmt_eta(seconds):
@@ -33,70 +45,157 @@ def fmt_eta(seconds):
     return f"{m // 60} h {m % 60:02d} min"
 
 
-class _Meter:
-    def __init__(self, clock=time.monotonic):
-        self.clock = clock
-        self.work = WorkProgress(clock)
+_PHOTO = re.compile(r"Processed file\s+\[\s*(\d+)\s*/\s*(\d+)\s*\]")
+_BLOCK = re.compile(r"(?:Processing block|Matching (?:block|image))\s+\[(\d+)/(\d+)(?:,\s*(\d+)/(\d+))?\]")
+_MATCHED = re.compile(r"^(?:.*\bfeature_matching\.cc:\d+\]\s*)?\s*in \d+(?:\.\d+)?s\s*$")
+_REGISTERING = re.compile(r"Registering image #\d+\s+\((?:(?:num_reg_frames|num_reg_images)=)?(\d+)\)")
+_VIEW = re.compile(r"Processing view\s+\d+\s*/\s*\d+\s+for (.+?)(?:\s+===)?$")
+_MAP_WRITE = re.compile(r"Writing (photometric|geometric) output for (.+)$")
+_FUSE = re.compile(r"Fusing image \[(\d+)/(\d+)\]")
+_FUSED = re.compile(r"\bin \d+(?:\.\d+)?s \(\d+ points\)\s*$")
+_COUNT = re.compile(r"\[(\d+)/(\d+)\]")
 
-    def _eta(self, done, total):
-        """Remaining time from the rate since the first counted item."""
-        self.work.update(done, total)
-        return self.work.remaining()
+
+def extraction_progress(line):
+    match = _PHOTO.search(line)
+    if match:
+        done, total = map(int, match.groups())
+        if 0 < done <= total:
+            return StageProgress("Extracting photo features", done, total, "photos processed")
+    return None
 
 
-class PatchMatchMeter(_Meter):
-    def __init__(self, todo_photometric, todo_geometric, views=None, clock=time.monotonic):
-        super().__init__(clock)
-        self.todo_p = max(0, int(todo_photometric))
-        self.todo_g = max(0, int(todo_geometric))
-        self.views = views
-        self.count = 0
+def command_progress(line, label):
+    if line.startswith("Progress stage: "):
+        return StageProgress(line.removeprefix("Progress stage: "))
+    match = _COUNT.search(line)
+    if match:
+        done, total = map(int, match.groups())
+        if 0 <= done <= total and total > 0:
+            return StageProgress(label, done, total, "completed")
+    return None
 
-    @property
-    def total(self):
-        return max(1, self.todo_p + self.todo_g)
+
+class MatchingMeter:
+    """Keep starts and completion separate in the modern and legacy logs."""
+    def __init__(self):
+        self.pending = False
+        self.done = 0
+        self.total = 0
+        self.unit = "blocks completed"
 
     def feed(self, line):
-        m = _VIEW.search(line)
-        if not m:
-            return None
-        self.count += 1
-        if self.todo_p and self.count == self.todo_p + 1:
-            self.work.reset()  # Geometric and photometric passes have different costs.
-        if self.views is None:
-            self.views = int(m.group(2))
-        # Only previous views are known complete; a just-started view is not half finished.
-        frac = min(1.0, (self.count - 1) / self.total)
-        if self.count <= self.todo_p:
-            what = f"photometric pass {self.count}/{self.todo_p}"
+        match = _BLOCK.search(line)
+        if match:
+            _, first_total, col, second_total = match.groups()
+            # A two-index block can be the start of a triangular traversal.
+            self.total = int(first_total) if col is None or first_total == second_total == "1" else 0
+            self.unit = "photos processed" if "Matching image" in line else "blocks completed"
+            self.pending = True
+        elif self.pending and _MATCHED.search(line):
+            self.pending = False
+            self.done += 1
         else:
-            what = f"geometric pass {self.count - self.todo_p}/{self.todo_g}"
-        eta = self._eta(self.count - 1, self.total)
-        return frac, f"Depth maps: {what}" + (f" - about {fmt_eta(eta)} left" if eta else "")
+            return None
+        return StageProgress("Matching photos", self.done, self.total, self.unit)
 
 
-class FusionMeter(_Meter):
-    def __init__(self, images=None, clock=time.monotonic):
-        super().__init__(clock)
-        self.images = images
-        self.points = 0
+class MappingMeter:
+    """An incremental mapper can discard a cluster and then restart its count."""
+    def __init__(self, photos=0, incremental=True):
+        self.photos = photos
+        self.incremental = incremental
+        self.largest = 0
 
     def feed(self, line):
-        p = _POINTS.search(line)
-        if p:
-            self.points = int(p.group(1))
+        match = _REGISTERING.search(line) if self.incremental else None
+        if match:
+            self.largest = max(self.largest, int(match.group(1)))
+            label = "Registering camera positions"
+        else:
+            message = line.rsplit("] ", 1)[-1].strip(" =-").lower()
+            if "global bundle adjustment" in message:
+                label = "Global bundle adjustment"
+            elif message.startswith("finding good initial image pair"):
+                label = "Finding an initial photo pair"
+            elif not self.incremental and "bundle adjustment" in message:
+                label = "Global bundle adjustment"
+            elif not self.incremental and "rotation averaging" in message:
+                label = "Estimating camera rotations"
+            elif not self.incremental and "global positioning" in message:
+                label = "Estimating camera positions"
+            else:
+                return None
+        total = self.photos if self.largest and self.largest <= self.photos else 0
+        return StageProgress(label, self.largest, total, "photos in largest reported model", estimate=False)
+
+
+class PatchMatchMeter:
+    """Count only newly computed depth + normal pairs that pass file checks."""
+    def __init__(self, photometric, geometric, valid_maps):
+        self.targets = {"photometric": set(photometric), "geometric": set(geometric)}
+        self.written = {kind: set() for kind in self.targets}
+        self.pending = set()
+        self.photometric_started = set()
+        self.kind = "photometric" if self.targets["photometric"] else "geometric"
+        self.valid_maps = valid_maps
+
+    def current(self):
+        return StageProgress(f"{self.kind.capitalize()} depth maps", len(self.written[self.kind]),
+                             len(self.targets[self.kind]), "maps written")
+
+    def feed(self, line):
+        match = _MAP_WRITE.search(line)
+        if match:
+            kind, name = match.groups()
+            if name not in self.targets[kind] or name in self.written[kind]:
+                return None
+            self.pending.add((kind, name))
+            if kind != self.kind and kind == "geometric":
+                self.kind = kind
+                return self.current()
+        match = _VIEW.search(line)
+        if match and self.kind == "photometric":
+            name = match.group(1)
+            if name in self.targets["geometric"] and self.targets["photometric"] <= self.photometric_started:
+                self.kind = "geometric"
+                return self.current()
+            if name in self.targets["photometric"]:
+                self.photometric_started.add(name)
+        return None
+
+    def poll(self):
+        completed = {(kind, name) for kind, name in self.pending if self.valid_maps(name, kind)}
+        self.pending.difference_update(completed)
+        for kind, name in completed:
+            self.written[kind].add(name)
+        if completed:
+            return self.current()
+        return None
+
+
+class FusionMeter:
+    def __init__(self, attempt=1):
+        self.attempt = f" (attempt {attempt})" if attempt > 1 else ""
+        self.pending = 0
+        self.fused = set()
+        self.total = 0
+
+    def feed(self, line):
         if "Reading workspace" in line:
-            return 0.0, "Fusion: loading depth maps"
-        m = _FUSE.search(line)
-        if not m:
-            return None
-        k, n = int(m.group(1)), int(m.group(2))
-        self.images = n
-        eta = self._eta(k - 1, n)
-        txt = f"Fusion: image {k}/{n}"
-        if self.points:
-            txt += f", {self.points / 1e6:.1f} M points"
-        return min(1.0, (k - 1) / max(1, n)), txt + (f" - about {fmt_eta(eta)} left" if eta else "")
+            return StageProgress(f"Loading depth maps for fusion{self.attempt}")
+        if "Writing output" in line:
+            return StageProgress(f"Writing fused point cloud{self.attempt}")
+        match = _FUSE.search(line)
+        if match:
+            self.pending, self.total = map(int, match.groups())
+        complete = self.pending and _FUSED.search(line)
+        if complete:
+            self.fused.add(self.pending)
+            self.pending = 0
+        if match or complete:
+            return StageProgress(f"Fusing depth maps{self.attempt}", len(self.fused), self.total, "views fused")
+        return None
 
 
 class WorkProgress:

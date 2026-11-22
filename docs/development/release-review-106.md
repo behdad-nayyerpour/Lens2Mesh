@@ -87,3 +87,27 @@ mid-run. Real GPU, driver-specific rendering, real-survey validation and exact
 installed apply/rollback checks remain separate from source tests. Existing
 third-party native source/build-provenance follow-up remains open; this change
 does not assert redistribution or trademark clearance.
+
+## Incremental processing progress
+
+The review traced the runner, modal background jobs and their callers through
+alignment, dense reconstruction, interrupted fusion, validation, result
+publication and the separate 3D loader. Recalculating weighted totals as the
+runner inserted new steps could leave the displayed bar ahead of the active
+stage. Depth-map and fusion starts were also mixed with completed work.
+
+Progress now reports the active stage and observed counts. Matching uses native
+completion logs. The incremental mapper shows the largest reported registration
+count while global bundle adjustment has no time estimate. Depth-map progress
+counts newly written depth and normal files after checking their headers and
+lengths. Each pass and fusion attempt has a fresh estimate. Validation and
+publication remain indeterminate and only successful publication completes the
+dialog. These changes do not modify the numerical algorithms, engine options,
+project files or the 3D view loader.
+
+Verification covers split process output, counter completion, stage and retry
+resets, incomplete maps, caches and publication failures. Native runs use the
+same small alignment and dense inputs for the previous build and the candidate.
+The installed test update is checked on a disposable copy with a Unicode path.
+Per-stage estimates still depend on stable measured throughput. Step totals and
+time estimates are unavailable when the native engine only reports a phase name.

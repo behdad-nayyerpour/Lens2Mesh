@@ -1673,7 +1673,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         return exe
 
     def _run(self, title, steps, on_success, meta=None, params=None, on_fail=None, engine_exe=None,
-             product=None):
+             product=None, photos=0):
         """meta: callable(seconds, stage_seconds) run after on_success, to record
         processing metadata (procmeta.record) for the step. params: the step's
         settings (dialog values), for the error report if it fails. on_fail: run
@@ -1695,15 +1695,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         if self.runner is not None and getattr(self.runner, "busy", False):
             QMessageBox.information(self, title, "Another processing task is running."); return
         dlg = ProgressDialog(title, self)
-        self.runner = cm.PipelineRunner(exe, steps, self)
-        self.runner.progress.connect(dlg.set_progress)
-        self.runner.detail.connect(dlg.set_detail)
-        stage_signal = getattr(self.runner, "stageProgress", None)
-        if stage_signal is not None:
-            stage_signal.connect(dlg.set_stage_progress)
-            stage_signal.connect(lambda fraction, text: self.busy_indicator.background(
-                "pipeline-detail", title, fraction * 1000 if fraction >= 0 else 0,
-                1000 if fraction >= 0 else 0, text))
+        self.runner = cm.PipelineRunner(exe, steps, self, photos=photos)
+        self.runner.stageProgress.connect(dlg.set_stage_progress)
         self.runner.log.connect(dlg.append)
         self.runner.log.connect(self.console.write)
         dlg.cancel_btn.clicked.connect(self.runner.cancel)
@@ -1711,20 +1704,19 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         t0 = time.perf_counter()
         stage_t = []                                   # [(label, start)]
 
-        def on_progress(_pct, label):
-            dlg.set_operation_steps(sum(1 for name, _, _ in self.runner.steps if name not in ("log", "gate"))
-                                    if hasattr(self.runner, "steps") else len(steps))
-            if label and (not stage_t or stage_t[-1][0] != label) and label != "Finished":
-                dlg.begin_stage()
-                stage_t.append((label, time.perf_counter()))
-        self.runner.progress.connect(on_progress)
+        def step_started(label):
+            if label == "gate":
+                dlg.begin_stage("Checking intermediate results")
+                return
+            dlg.begin_stage(label)
+            stage_t.append((label, time.perf_counter()))
+        self.runner.stepStarted.connect(step_started)
         job = f"{title} - {os.path.splitext(os.path.basename(self.project.path))[0] or 'Untitled'}"
         self.jobs.add_job(f"[running] {job}")
         mark = self.console.mark()
         load_tb = []
         def done(ok, msg):
             dlg.running = False
-            dlg._timer.stop()
             dt = time.perf_counter() - t0
             self.jobs.add_job(f"[{'done' if ok else 'failed'}] {job}  ({dt:.1f} s)")
             current = self.project is owner_project and self.dataset is owner_dataset
@@ -1732,6 +1724,11 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             if not current:
                 ok, msg = False, "Project changed during processing; results remain on disk. Reopen the original project to import them."
             if ok:
+                dlg.begin_stage("Finalizing results...")
+                dlg.cancel_btn.setEnabled(False)
+                dlg.stage.repaint()
+                dlg.stage_bar.repaint()
+                dlg.timing.repaint()
                 try:
                     on_success()
                     if product is not None:
@@ -1756,6 +1753,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                     self.refresh_all()
                 except Exception as e:  # noqa: BLE001 - metadata must never fail a step
                     self.log(f"{title}: could not record processing metadata: {e}")
+            dlg.cancel_btn.setEnabled(True)
             dlg.cancel_btn.setText("Close")
             dlg.cancel_btn.clicked.disconnect(); dlg.cancel_btn.clicked.connect(dlg.accept)
             if ok:
@@ -1785,7 +1783,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
 
         def end_busy(*_):                    # wait cursor restored first (also on error / cancel)
             if not ended:
-                ended.append(1); self.busy_indicator.background("pipeline-detail")
+                ended.append(1)
                 self.busy_indicator.end()
         self.runner.finished.connect(end_busy)
         self.runner.finished.connect(done)
@@ -1955,7 +1953,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                                 ("Estimating", "Triangulating", "Registering", "Optimizing", "Reconstruct",
                                  "Mapping", "Bundle"))), 2) or None)
             ch.meta.pop("sparse_stats", None)          # recomputed by the view loader
-        self._run("Align Photos", steps, loaded, meta, params=s, product="tie")
+        self._run("Align Photos", steps, loaded, meta, params=s, product="tie", photos=len(enabled))
 
     def _report_unaligned(self, missing, total):
         """List photos that could not be aligned (Console + status bar) so the

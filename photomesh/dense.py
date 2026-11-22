@@ -241,6 +241,7 @@ def run_undistort(jobs, workers, log=print, progress=None, executor_factory=None
     MemoryError (or whose worker died) are retried once, serially, after the
     pool is gone. Returns (failed messages, stats)."""
     import gc
+    import time
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from concurrent.futures.process import BrokenProcessPool
     import multiprocessing as mp
@@ -248,6 +249,18 @@ def run_undistort(jobs, workers, log=print, progress=None, executor_factory=None
     mon = PeakMonitor().start()
     bad, retry, peaks, done = [], [], [], 0
     n = len(jobs)
+    last_reported = 0
+    last_report_time = 0.0
+
+    def report():
+        nonlocal last_reported, last_report_time
+        if progress is None or done == last_reported:
+            return
+        now = time.monotonic()
+        if done == n or now - last_report_time >= 1.0:
+            progress(done, n)
+            last_reported, last_report_time = done, now
+
     try:
         if workers > 1 and n > 1:
             make = executor_factory or (lambda w: ProcessPoolExecutor(w, mp_context=mp.get_context("spawn")))
@@ -270,8 +283,7 @@ def run_undistort(jobs, workers, log=print, progress=None, executor_factory=None
                             retry.append(j)
                         else:
                             bad.append(f"{os.path.basename(dst)}: {msg}")
-                        if progress and (done % 10 == 0 or done == n):
-                            progress(done, n)
+                        report()
             except BrokenProcessPool:
                 retry += [j for f, j in pending.items() if not f.done() or f.exception() is not None]
             retry = list(dict.fromkeys(retry))
@@ -285,8 +297,7 @@ def run_undistort(jobs, workers, log=print, progress=None, executor_factory=None
                     retry.append(j)
                 else:
                     bad.append(f"{os.path.basename(dst)}: {msg}")
-                if progress and (done % 10 == 0 or done == n):
-                    progress(done, n)
+                report()
         if retry:
             log(f"Retrying {len(retry)} photo(s) one at a time after running out of memory "
                 f"in the parallel pass")
@@ -297,10 +308,11 @@ def run_undistort(jobs, workers, log=print, progress=None, executor_factory=None
                     done += 1
                 else:
                     bad.append(f"{os.path.basename(dst)}: {msg} (also failed when retried alone)")
-                if progress:
-                    progress(done, n)
+                report()
     finally:
         mem = mon.stop()
+    if progress is not None and done != last_reported:
+        progress(done, n)
     stats = {"done": done, "retried": len(retry), "worker_peak": max(peaks) if peaks else 0, **mem}
     return bad, stats
 
@@ -778,7 +790,7 @@ def fusion_steps(base, dense, label="Building point cloud (fusion)", available=N
     for fn in (out, out + ".vis"):                    # stale or partial output
         if os.path.exists(fn):
             os.remove(fn)
-    args = Try(fusion_args(base, p), meter=FusionMeter(n))
+    args = Try(fusion_args(base, p), meter=FusionMeter(attempt + 1))
     sizes = fusion_sizes(w, h)
 
     def retry():
@@ -801,7 +813,7 @@ def fusion_steps(base, dense, label="Building point cloud (fusion)", available=N
                 ("gate", lambda: fusion_steps(base, dense, label, None, attempt + 1, nxt, cache, hist), 0)]
     args.fallback = retry
     return [("log", describe_plan(p, n, w, h, avail) + (f" (retry {attempt})" if attempt else ""), 0),
-            (label, args, 15)]
+            (f'{label} (attempt {attempt + 1})' if attempt else label, args, 15)]
 
 
 # ------------------------------------------------------------- vis file
@@ -1076,7 +1088,7 @@ def dense_steps(exe, wd, s, image_root, opt=None, disk_free=None):
                 "run Build Point Cloud again with 'Reuse depth maps' checked - finished depth maps are kept.")
         out.append(("log", f"Depth maps to compute: {len(todo_p)} photometric + {len(todo_gr)} geometric; "
                            f"disk: ~{need / GB:.0f} GB needed, {free / GB:.0f} GB free", 0))
-        meter = PatchMatchMeter(len(todo_p), len(todo_gr), len(refs))
+        meter = PatchMatchMeter(todo_p, todo_gr, lambda name, kind: not view_problems(dense, name, kind))
         return out + [("Building depth maps", Cmd(pm, meter=meter), 70), ("Cleaning up depth maps", after_pm, 1)]
 
     def fusion_gate():

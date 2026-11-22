@@ -42,9 +42,11 @@ def cmd_filter_cloud(cfg):
     from . import pcfilter as pf
     from .dense import read_vis_counts
     t0 = time.perf_counter()
+    _log("Progress stage: Reading fused point cloud")
     cloud = pf.read_cloud(cfg["input"])
     _log(f"Read {len(cloud['xyz']):,} fused points ({time.perf_counter() - t0:.1f} s)")
     if os.path.exists(cfg.get("vis", "")):
+        _log("Progress stage: Reading point visibility")
         t1 = time.perf_counter()
         conf = read_vis_counts(cfg["vis"])
         if len(conf) == len(cloud["xyz"]):
@@ -56,12 +58,15 @@ def cmd_filter_cloud(cfg):
         C, D = _cameras(cfg["model"])
     up = cfg.get("up")
     input_count=len(cloud["xyz"])
+    _log("Progress stage: Filtering point cloud")
     cloud, stats = pf.filter_cloud(cloud, cfg, C, D, up, log=_log)
     if not len(cloud["xyz"]):
         raise ValueError("Filtering removed every point; previous cloud was kept. Relax the filters.")
     temporary = cfg["output"] + ".building.ply"
     try:
+        _log("Progress stage: Writing filtered point cloud")
         pf.write_cloud(temporary, cloud["xyz"], cloud.get("rgb"), cloud.get("normals"), cloud.get("confidence"))
+        _log("Progress stage: Validating filtered point cloud")
         from .dense import ply_vertex_count
         if not ply_vertex_count(temporary):
             raise ValueError("Incomplete point cloud output")

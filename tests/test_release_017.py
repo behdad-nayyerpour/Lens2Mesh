@@ -115,10 +115,10 @@ def _fake_runner(result):
     from PySide6.QtCore import QObject, Signal
 
     class FakeRunner(QObject):
-        progress = Signal(int, str); detail = Signal(str); log = Signal(str); finished = Signal(bool, str)
+        stepStarted = Signal(str); stageProgress = Signal(object); log = Signal(str); finished = Signal(bool, str)
         failure = None
 
-        def __init__(self, exe, steps, parent=None):
+        def __init__(self, exe, steps, parent=None, **kwargs):
             super().__init__(parent)
 
         def start(self):

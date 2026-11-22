@@ -34,13 +34,14 @@ def test_progress_dialog_keeps_unknown_stage_indeterminate(qtbot):
     from photomesh.dialogs import ProgressDialog
     dialog = ProgressDialog("Test")
     qtbot.addWidget(dialog)
-    dialog.set_progress(20, "Stage")
-    dialog.set_stage_progress(-1, "Loading")
+    from photomesh.progress import StageProgress
+    dialog.begin_stage("Stage")
+    dialog.set_stage_progress(StageProgress("Loading"))
     assert dialog.stage_bar.maximum() == 0
-    dialog.set_stage_progress(.4, "4/10 completed")
+    dialog.set_stage_progress(StageProgress("Processing", 4, 10))
     assert dialog.stage_bar.value() == 400
-    dialog.set_progress(10, "Retry")
-    assert dialog.bar.value() == 200
+    dialog.begin_stage("Retry")
+    assert dialog.stage_bar.maximum() == 0
     dialog.running = False
 
 
@@ -220,7 +221,7 @@ def test_runner_keeps_split_counter_lines(qtbot):
               "sys.stdout.write('2]\\n');sys.stdout.flush()")
     runner = PipelineRunner(sys.executable, [("Counting", ["-u", "-c", script], 1)])
     fractions = []
-    runner.stageProgress.connect(lambda fraction, text: fractions.append(fraction))
+    runner.stageProgress.connect(lambda update: fractions.append(update.fraction))
     with qtbot.waitSignal(runner.finished, timeout=5000) as done:
         runner.start()
     assert done.args[0] is True
