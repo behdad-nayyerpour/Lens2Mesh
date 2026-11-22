@@ -506,19 +506,22 @@ def cameras_panel(table):
 
 def _gcp_status_dot(status):
     rgb = {"Measured": "#087a48", "Pins ready": "#75d66d", "Review auto placements": "#428de6"}
-    pixmap = QPixmap(16, 16)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    center = QPointF(8, 8)
-    painter.setPen(QPen(QColor("#f5f7f9"), 1.5))
-    painter.setBrush(QColor(rgb.get(status, "#929ba5")))
-    painter.drawEllipse(center, 6, 6)
-    painter.setPen(QPen(QColor("#252b31"), 1))
-    painter.setBrush(Qt.NoBrush)
-    painter.drawEllipse(center, 4.8, 4.8)
-    painter.end()
-    return QIcon(pixmap)
+    icon = QIcon()
+    fill = QColor(rgb.get(status, "#929ba5"))
+    # Draw at native resolution for common Windows display scales.
+    for scale in (1., 1.25, 1.5, 1.75, 2., 2.5, 3., 4.):
+        size = round(16 * scale)
+        pixmap = QPixmap(size, size)
+        pixmap.setDevicePixelRatio(scale)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#c7d0db"), 1.0))
+        painter.setBrush(fill)
+        painter.drawEllipse(QPointF(8, 8), 6.5, 6.5)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 class MarkersPane(QTableWidget):
@@ -597,7 +600,8 @@ class MarkersPane(QTableWidget):
         dark = self.palette().color(QPalette.Base).lightness() < 128
         for r, m in enumerate(ms):
             pend = (self.pending or {}).get(m["label"])
-            ref = pend or m.get("ref") or [None, None, None]
+            estimate = m.get("photo_model_xyz") if pend is None and m.get("ref") is None else None
+            ref = pend or m.get("ref") or estimate or [None, None, None]
             acc = m.get("acc")
             e = rows.get(m["label"], {})
             proj = m.get("projections", {})
@@ -609,7 +613,7 @@ class MarkersPane(QTableWidget):
             if m.get("disabled"):
                 status = "Ignored"
             elif m.get("ref") is None:
-                status = "Needs XYZ"
+                status = "Model estimate" if estimate is not None else "Needs XYZ"
             elif automatic and e.get("pix") is None:
                 status = "Review auto placements"
             elif manual_on_aligned < 2 and e.get("pix") is None:
@@ -635,6 +639,12 @@ class MarkersPane(QTableWidget):
                     it.setIcon(self._status_icons.get(status, self._status_icons["other"]))
                     it.setData(ROLE + 1, bool(control))
                     it.setData(ROLE + 2, bool(m.get("disabled")))
+                elif k in (1, 2, 3) and estimate is not None:
+                    font = it.font()
+                    font.setItalic(True)
+                    it.setFont(font)
+                    it.setToolTip("Model coordinates at placement. Enter X, Y and Z in the control "
+                                  "coordinate system to add a surveyed reference.")
                 elif k in (1, 2, 3, 4):
                     it.setToolTip("Double-click to edit" + (" (incomplete: enter X, Y and Z)" if pend else ""))
                     if pend:

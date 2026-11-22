@@ -95,7 +95,17 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
     pane._menu(QPoint(0, 0))
     assert menu_actions == ["Add GCP", "Rename GCP", "Remove GCP", "Ignore GCP (in all photos)",
                             "Open photos", "All photos"]
-    assert not pane.item(0, 0).icon().isNull()
+    from PySide6.QtCore import QSize
+    icon = pane.item(0, 0).icon()
+    for scale in (1., 1.25, 1.5, 2., 3.):
+        pixmap = icon.pixmap(QSize(16, 16), scale)
+        diameter = round(16 * scale)
+        assert pixmap.devicePixelRatio() == scale
+        assert pixmap.width() == pixmap.height() == diameter
+        image = pixmap.toImage()
+        assert image.pixelColor(diameter // 2, diameter // 2).name() == "#087a48"
+        assert 0 < image.pixelColor(diameter // 2, round(1.5 * scale)).alpha()
+        assert image.pixelColor(0, 0).alpha() == 0
     assert pane.item(0, 9).foreground().style() == panes.Qt.NoBrush
     assert {"Import GCPs…", "Add GCP", "Change…"} <= set(buttons)
     assert not any(label.text() == "Control coordinates" for label in panel.findChildren(QLabel))
@@ -108,14 +118,33 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
     assert _marker(window, "P12")["projections"]["img_0002"][3] == "refined"
 
 
-def test_add_marker_on_photo_pins_and_predicts_other_photos(window, tmp_path):
+@pytest.mark.parametrize("offset", [None, [1000., 2000., 50.]])
+def test_add_marker_on_photo_pins_and_predicts_other_photos(window, tmp_path, offset):
+    from photomesh.project import Project
+
     ch = _scene(window, tmp_path)
     ch.model_ply = _ground_ply(str(tmp_path / "ground.ply"))
+    if offset is not None:
+        ch.georef = {"offset": offset, "crs": "LOCAL"}
+        ch.reference_settings["gcp_crs"] = "EPSG:4326"
     window.markers_pane.clearSelection()
     assert window.markers_pane.current_label() is None          # no active marker needed
     lab = window.add_marker_at_photo(500.0, 400.0, k=0)
     assert lab == "point 1"
     m = _marker(window, lab)
+    expected = np.array([100., 100., 0.]) + (offset if offset is not None else np.zeros(3))
+    table = window.markers_pane
+    assert [table.item(0, col).text() for col in (1, 2, 3)] == [f"{value:.4f}" for value in expected]
+    assert table.item(0, 9).text() == "Model estimate"
+    assert np.allclose(m["photo_model_xyz"], expected)
+    assert m["ref"] is None
+    saved_path = str(tmp_path / "estimated-gcp.pmsx")
+    window.project.save(saved_path)
+    assert Project.load(saved_path).dataset.markers[0] == m
+    with open(saved_path, encoding="utf-8") as file:
+        assert "photo_model_xyz" not in json.load(file)["datasets"][0]["markers"][0]
+    assert window.undo_markers() and not window.dataset.markers
+    assert window.redo_markers() and window.dataset.markers[0] == m
     p = m["projections"]
     assert p["img_0001"] == [500.0, 400.0, True]                 # pinned where clicked
     assert p["img_0002"][2] is False                             # predicted, stored unpinned
@@ -133,8 +162,30 @@ def test_add_marker_falls_back_to_tie_points_and_reports_no_surface(window, tmp_
     _scene(window, tmp_path)                                      # no mesh, no DEM
     lab = window.add_marker_at_photo(500.0, 400.0, k=0)            # ray hits tie point (100, 100, 0)
     assert "img_0002" in _marker(window, lab)["projections"]
+    assert [window.markers_pane.item(0, col).text() for col in (1, 2, 3)] == ["", "", ""]
     assert window.add_marker_at_ray(np.array([500.0, 500, 50]), np.array([0.0, 0, -1])) is None
     assert len(window.dataset.markers) == 1
+
+
+
+def test_add_marker_uses_current_elevation_preview_for_model_estimate(window, tmp_path):
+    ch = _scene(window, tmp_path)
+    offset = [1000., 2000., 50.]
+    ch.georef = {"offset": offset, "crs": "LOCAL"}
+    ortho = window.ortho_view
+    ortho.zgrid = (np.full((6, 6), 55.), 1097., 2103., 1., None)
+    ortho._height_range = (55., 55.)
+    ortho.height_surface = {"georef": True, "offset": offset}
+
+    label = window.add_marker_at_photo(500., 400., k=0)
+    point = _marker(window, label)
+    assert point["photo_model_xyz"] == pytest.approx([1100., 2100., 55.])
+    assert point["ref"] is None
+
+    ortho.height_surface["stale"] = True
+    other = _marker(window, window.add_marker_at_photo(500., 400., k=0))
+    assert "photo_model_xyz" not in other
+    assert other["projections"]["img_0001"] == [500., 400., True]
 
 
 def test_model_view_cannot_add_markers_and_ray_math_stays_correct(window, tmp_path):
@@ -369,9 +420,10 @@ def test_dynamic_prediction_filter_and_scoped_ignore_survive_reopen(window, tmp_
 
 
 def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot):
-    from PySide6.QtCore import QPoint, QPointF, Qt
-    from PySide6.QtWidgets import QGraphicsView, QMenu
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PySide6.QtWidgets import QApplication, QGraphicsSimpleTextItem, QGraphicsView, QMenu
     from photomesh import views
+    from photomesh.marker_style import HOVER_COLOR, color
 
     _scene(window, tmp_path)
     window.open_photo(0)
@@ -384,9 +436,15 @@ def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot
                      available=["pinned", "local", "global", "auto"],
                      ignored_here={"local"}, ignored_all={"global"})
 
+    labels = {item.text(): item for item in view._overlay if isinstance(item, QGraphicsSimpleTextItem)}
     menus = []
+    during_popup = []
+
     class InspectableMenu(QMenu):
         def exec(self, _position):
+            QApplication.sendEvent(canvas, QEvent(QEvent.Leave))
+            during_popup.append((view._hovered_flag, tuple(
+                name for name, item in labels.items() if item.brush().color() == HOVER_COLOR)))
             menus.append([(action.text(), action.isEnabled(),
                            [(sub.text(), sub.isEnabled()) for sub in action.menu().actions()]
                            if action.menu() else None) for action in self.actions()])
@@ -397,16 +455,22 @@ def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot
 
     qtbot.mouseMove(canvas, on_point(500))
     assert view._flags["pinned"].hovered
+    assert labels["pinned"].brush().color() == HOVER_COLOR
     qtbot.mouseMove(canvas, on_point(620))
     assert view._flags["local"].hovered and not view._flags["pinned"].hovered
+    assert labels["local"].brush().color() == HOVER_COLOR
+    assert labels["pinned"].brush().color() == color("pinned")
     for u in (500, 620, 380, 750):
         view._context(on_point(u))
+        assert view._hovered_flag is None
+    assert during_popup == [(name, (name,)) for name in ("pinned", "local", "global", "auto")]
+    assert labels["auto"].brush().color() == color("placed")
     colors = [menu[0][1] for menu in menus]
     assert colors == [False, True, True, True]
     assert [name for name, _, _ in menus[0]] == [
         "Pin GCP", "Move GCP", "Ignore GCP", "Delete GCP", "Show GCP on table"]
-    assert menus[1][2][2] == [("only from this photo", False), ("From all photos", True)]
-    assert menus[2][2][2] == [("only from this photo", False), ("From all photos", False)]
+    assert menus[1][2][2] == [("Only from this photo", False), ("From all photos", True)]
+    assert menus[2][2][2] == [("Only from this photo", False), ("From all photos", False)]
     blank = view.view.mapFromScene(QPointF(500, 550))
     qtbot.mouseMove(canvas, blank)
     assert not any(flag.hovered for flag in view._flags.values())
@@ -416,9 +480,7 @@ def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot
     view.zoom(3)
     scrollbar = view.view.horizontalScrollBar()
     start_value = scrollbar.value()
-    from PySide6.QtCore import QEvent
     from PySide6.QtGui import QMouseEvent
-    from PySide6.QtWidgets import QApplication
     start = canvas.rect().center()
     qtbot.mousePress(canvas, Qt.LeftButton, pos=start)
     end = QPointF(start + QPoint(40, 0))

@@ -241,28 +241,58 @@ class MarkerEditMixin:
         camera = cached[1]
         point = None
         if camera is not None:
-            origin, direction = self._pixel_ray(camera, u, v)
-            if np.isfinite(direction).all():
-                if ch.model_ply and not ch.meta.get("model", {}).get("stale"):
-                    scene = self._raycast_scene(build=False)
-                    if scene is None:
-                        self._start_occlusion_scene(for_photo_coordinates=True)
-                    else:
-                        point = self._mesh_ray_hit(scene, origin, direction)
-                surface = self.ortho_view.height_surface or {}
-                if (point is None and ch.georef and surface.get("georef") and not surface.get("stale")
-                        and not self.ortho_view.geographic):
-                    rotation = np.asarray(surface.get("rotation", np.eye(3)), float)
-                    offset = np.asarray(surface.get("offset", self._frame(ch).offset), float)
-                    if (rotation.shape == (3, 3) and offset.shape == (3,)
-                            and np.isfinite(rotation).all() and np.isfinite(offset).all()):
-                        world = self.ortho_view.height_ray_hit(rotation @ origin + offset, rotation @ direction)
-                        if world is not None:
-                            point = rotation.T @ (world - offset)
+            point, _ = self._photo_surface_hit(*self._pixel_ray(camera, u, v))
         text = None
         if point is not None:
             text = format_coords(*self._frame(ch).to_world(point), unit="m" if ch.georef else "")
         photo.set_model_coordinates(text)
+
+    def _photo_surface_hit(self, origin, direction, *, build=False):
+        """Current mesh or elevation surface intersected by a calibrated photo ray."""
+        ch = self.dataset
+        if not np.isfinite([origin, direction]).all():
+            return None, None
+        if ch.model_ply and not ch.meta.get("model", {}).get("stale"):
+            scene = self._raycast_scene(build=build)
+            if scene is not None:
+                point = self._mesh_ray_hit(scene, origin, direction)
+                if point is not None:
+                    return point, "model"
+            elif build:
+                mesh = getattr(self.model_view, "_mesh_data", None)
+                if mesh and mesh[0] is not None and len(mesh[1]) <= 3_000_000:
+                    distance = ray_mesh(mesh[0], mesh[1], origin, direction)
+                    if distance is not None:
+                        return origin + distance * direction, "model"
+            else:
+                self._start_occlusion_scene(for_photo_coordinates=True)
+
+        surface = self.ortho_view.height_surface or {}
+        if ch.georef and surface.get("georef") and not surface.get("stale") and not self.ortho_view.geographic:
+            rotation = np.asarray(surface.get("rotation", np.eye(3)), float)
+            offset = np.asarray(surface.get("offset", self._frame(ch).offset), float)
+            if (rotation.shape == (3, 3) and offset.shape == (3,)
+                    and np.isfinite(rotation).all() and np.isfinite(offset).all()):
+                world = self.ortho_view.height_ray_hit(rotation @ origin + offset, rotation @ direction)
+                if world is not None:
+                    return rotation.T @ (world - offset), "DEM"
+
+        # Explicit placement can read the full elevation raster when its preview is unavailable.
+        dem = ch.dem or {}
+        ortho = ch.orthomosaic or {}
+        if build and ch.georef and direction[2] < -1e-3:
+            raster_name = ("DEM" if dem.get("path") and not dem.get("stale") else
+                           "Orthomosaic height" if ortho.get("height_path") and not ortho.get("stale") else None)
+            if raster_name is not None and any(name == raster_name for name, *_ in self._surfaces(ch)):
+                try:
+                    sampler = self._sampler(raster_name)
+                except Exception:  # A failed elevation read still allows a photo pin.
+                    sampler = None
+                if sampler is not None:
+                    point = self._march_height(sampler, origin, direction)
+                    if point is not None:
+                        return point, "DEM"
+        return None, None
 
     @staticmethod
     def _mesh_ray_hit(scene, origin, direction):
@@ -302,24 +332,9 @@ class MarkerEditMixin:
         """First surface point along the ray (model frame): mesh, else DEM, else
         nearest tie point to the ray. Returns (X, source) or (None, reason)."""
         o = np.asarray(o, float); d = np.asarray(d, float); d = d / np.linalg.norm(d)
-        sc = self._raycast_scene()
-        if sc is not None:
-            point = self._mesh_ray_hit(sc, o, d)
-            if point is not None:
-                return point, "model"
-        md = getattr(self.model_view, "_mesh_data", None)
-        if sc is None and md and md[0] is not None and len(md[1]) <= 3_000_000:
-            t = ray_mesh(md[0], md[1], o, d)
-            if t is not None:
-                return o + t * d, "model"
-        try:
-            smp = self._sampler("DEM") if self.dataset.georef else None
-        except Exception:  # noqa: BLE001
-            smp = None
-        if smp is not None and d[2] < -1e-3:
-            X = self._march_height(smp, o, d)
-            if X is not None:
-                return X, "DEM"
+        point, source = self._photo_surface_hit(o, d, build=True)
+        if point is not None:
+            return point, source
         model = self._sparse_model()
         if model is not None and len(model.points.xyz):
             P = np.asarray(model.points.xyz, float)
@@ -433,6 +448,10 @@ class MarkerEditMixin:
         if ray is not None:
             X, src = self.surface_hit(*ray)
         m = g.Marker(label=label, projections={stem: [float(u), float(v), True]})
+        if src in ("model", "DEM") and self.dataset.cameras[k].aligned:
+            world = self._frame(self.dataset).to_world(X)
+            if np.isfinite(world).all():
+                m.photo_model_xyz = world.tolist()
         pred = self.predicted_projections(X, skip={stem}) if X is not None else {}
         m.projections.update(pred)
         self._markers_snapshot()
@@ -592,6 +611,7 @@ class MarkerEditMixin:
                     if col == 2 and not -80. <= v <= 84.:
                         raise ValueError("latitude must be within the supported UTM range (-80° to 84°)")
                 self._markers_snapshot()
+                m.photo_model_xyz = None
                 if all(c is not None for c in cur):
                     m.ref = [float(c) for c in cur]; self._ref_pending.pop(label, None)
                     msg = f"GCP {label}: reference set to {m.ref}"

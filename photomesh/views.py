@@ -1098,15 +1098,26 @@ class _PhotoFlag(QGraphicsItem):
         self.colour = color(state)
         self.active = active
         self.hovered = False
+        self.label_item = None
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
         self.setAcceptedMouseButtons(Qt.NoButton)
 
     def boundingRect(self):
         return QRectF(-5, -27, 23, 33)
 
+    def display_color(self):
+        from .marker_style import HOVER_COLOR
+        return HOVER_COLOR if self.hovered else self.colour
+
+    def set_hovered(self, hovered):
+        self.hovered = hovered
+        if self.label_item is not None:
+            self.label_item.setBrush(self.display_color())
+        self.update()
+
     def paint(self, painter, option, widget=None):
-        from .marker_style import HOVER_COLOR, draw_flag
-        draw_flag(painter, 0, 0, HOVER_COLOR if self.hovered else self.colour, self.active)
+        from .marker_style import draw_flag
+        draw_flag(painter, 0, 0, self.display_color(), self.active)
 
 
 class PhotoView(QWidget):
@@ -1152,6 +1163,7 @@ class PhotoView(QWidget):
         self.ignored_here, self.ignored_all = set(), set()
         self._flags = {}
         self._hovered_flag = None
+        self._context_flag = None
         self._cursor_view_pos = None
         # Show Markers / Show Marker Labels, the same toggles as the Model and Ortho views
         self.vis = {"markers": True, "marker_labels": True}
@@ -1241,6 +1253,7 @@ class PhotoView(QWidget):
     def _update_photo_cursor(self):
         pos = self._cursor_view_pos
         if pos is None:
+            self._set_hovered_flag(None)
             return
         blocked = getattr(self, "survey_enabled", False) or self._moving_marker is not None
         self._set_hovered_flag(None if blocked else self._flag_at(pos))
@@ -1332,6 +1345,7 @@ class PhotoView(QWidget):
 
     def clear(self):
         """Drop the displayed photo and overlays when the project changes."""
+        self._context_flag = None
         self.cancel_marker_move()
         self._clear_photo_cursor()
         sc = self.view.scene()
@@ -1349,6 +1363,7 @@ class PhotoView(QWidget):
         self.caption.setText("Select a photo in the Photos pane to open it.")
 
     def open(self, path, caption=""):
+        self._context_flag = None
         self.cancel_marker_move()
         self._clear_photo_cursor()
         self._flags.clear()
@@ -1479,8 +1494,6 @@ class PhotoView(QWidget):
                 _label_item(str(lab), a, ls, c, 0.0)
 
     def _draw_markers(self):
-        from .marker_style import color
-
         scene = self.view.scene()
         for item in self._overlay:
             scene.removeItem(item)
@@ -1502,13 +1515,14 @@ class PhotoView(QWidget):
                 font.setBold(True)
                 font.setPointSizeF(10)
                 text.setFont(font)
-                text.setBrush(color(state))
+                text.setBrush(item.colour)
                 text.setPen(QPen(QColor(0, 0, 0, 210), 0.5))
                 text.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 text.setAcceptedMouseButtons(Qt.NoButton)
                 text.setPos(u, v)
                 text.setTransform(text.transform().translate(17, -27))
                 text.setZValue(8)
+                item.label_item = text
                 self._overlay.append(text)
         self._update_photo_cursor()
 
@@ -1521,17 +1535,16 @@ class PhotoView(QWidget):
         return flag_at(pos.x(), pos.y(), anchors)
 
     def _set_hovered_flag(self, label):
+        label = self._context_flag if self._context_flag is not None else label
         if label == self._hovered_flag:
             return
         old = self._flags.get(self._hovered_flag)
         if old is not None:
-            old.hovered = False
-            old.update()
+            old.set_hovered(False)
         self._hovered_flag = label
         new = self._flags.get(label)
         if new is not None:
-            new.hovered = True
-            new.update()
+            new.set_hovered(True)
 
     def _context(self, pos):
         if self.path is None or getattr(self, "survey_enabled", False):
@@ -1542,7 +1555,6 @@ class PhotoView(QWidget):
         p = self.view.mapToScene(pos)
         if label is None and not self._inside_photo(p.x(), p.y()):
             return
-        self._set_hovered_flag(label)
         menu = QMenu(self)
         if label is None:
             menu.addAction("Add GCP").triggered.connect(lambda: self.addMarker.emit(p.x(), p.y()))
@@ -1558,7 +1570,7 @@ class PhotoView(QWidget):
             pin.triggered.connect(lambda: self.markerAction.emit("pin", label))
             menu.addAction("Move GCP").triggered.connect(lambda: self.markerAction.emit("move", label))
             ignore = menu.addMenu("Ignore GCP")
-            local = ignore.addAction("only from this photo")
+            local = ignore.addAction("Only from this photo")
             local.setEnabled(label not in self.ignored_here and label not in self.ignored_all)
             local.triggered.connect(lambda: self.markerAction.emit("ignore_photo", label))
             all_photos = ignore.addAction("From all photos")
@@ -1566,7 +1578,14 @@ class PhotoView(QWidget):
             all_photos.triggered.connect(lambda: self.markerAction.emit("ignore", label))
             menu.addAction("Delete GCP").triggered.connect(lambda: self.markerAction.emit("delete", label))
             menu.addAction("Show GCP on table").triggered.connect(lambda: self.markerAction.emit("select", label))
-        menu.exec(self.view.viewport().mapToGlobal(pos))
+        # A popup takes mouse focus and delivers Leave to the photo.
+        self._context_flag = label
+        self._set_hovered_flag(label)
+        try:
+            menu.exec(self.view.viewport().mapToGlobal(pos))
+        finally:
+            self._context_flag = None
+            self._update_photo_cursor()
 
     def rotate(self, degrees):
         self.view.rotate(degrees)

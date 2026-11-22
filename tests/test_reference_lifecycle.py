@@ -87,8 +87,9 @@ def test_ortho_never_paints_point_cloud_as_an_orthomosaic(window):
 
 def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,monkeypatch):
     from PySide6.QtCore import QPoint
-    from PySide6.QtGui import QContextMenuEvent,QAction
+    from PySide6.QtGui import QAction, QContextMenuEvent, QImage, QPainter
     from photomesh import orthoview
+    from photomesh.marker_style import HOVER_COLOR, color
     ch=_scene(window,tmp_path)
     original=g.Marker("G1",ref=[700.,800.,20.],enabled=False,
                       projections={"IMG_0001.JPG":[500.,400.,True]})
@@ -104,6 +105,28 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
     monkeypatch.setattr(view,"coordinates_at",lambda *a:(115.,105.,9.))
     before=copy.deepcopy(ch.markers); history=len(window._mk_undo)
     actions=[]
+    painted_flags, painted_labels = [], []
+    draw_flag = orthoview.draw_flag
+
+    def capture_flag(painter, x, y, colour, active):
+        painted_flags.append(colour)
+        draw_flag(painter, x, y, colour, active)
+
+    monkeypatch.setattr(orthoview, "draw_flag", capture_flag)
+
+    def render():
+        image = QImage(view.size(), QImage.Format_ARGB32)
+        class CapturePainter(QPainter):
+            def drawText(self, *args):
+                if args[-1] == "G1":
+                    painted_labels.append(self.pen().color())
+                return super().drawText(*args)
+        painter = CapturePainter(image)
+        try:
+            view._paint(painter)
+        finally:
+            painter.end()
+
     class TestMenu:
         def __init__(self,parent): self.parent,self.items=parent,[]
         def addAction(self,text):
@@ -111,6 +134,9 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
         def addSeparator(self): pass
         def exec(self,*args):
             actions.extend(a.text() for a in self.items)
+            if len(self.items) == 3:
+                view.leaveEvent(None)
+                render()
             self.items[0].trigger()
             if len(self.items) == 3:
                 self.items[1].trigger()
@@ -120,9 +146,10 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
     from PySide6.QtGui import QGuiApplication
     assert QGuiApplication.clipboard().text() == "110.000\t100.000\t5.000"
     assert not window.markers_pane.isRowHidden(0)
-    assert view._hovered_flag == "G1"
-    view.leaveEvent(None)
+    assert painted_flags == painted_labels == [HOVER_COLOR]
     assert view._hovered_flag is None
+    render()
+    assert painted_flags == painted_labels == [HOVER_COLOR, color("predicted")]
     actions.clear()
     elsewhere = event_pos + QPoint(40, 40)
     view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, elsewhere, elsewhere))

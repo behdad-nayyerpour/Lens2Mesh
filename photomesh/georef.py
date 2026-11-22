@@ -228,6 +228,7 @@ class Marker:
     disabled: bool = False               # excluded from adjustment/report, independent of Control/Check
     locked: bool = False                 # explicit user lock against accidental repositioning
     ignored_photos: list[str] = field(default_factory=list)  # unambiguous source-photo stems
+    photo_model_xyz: list[float] | None = None  # clicked surface in the model's world frame at placement
 
     def __post_init__(self):
         self.ignored_photos = sorted({name.lower() for name in self.ignored_photos})
@@ -243,6 +244,8 @@ class Marker:
         record = asdict(self)
         if not self.ignored_photos:
             record.pop("ignored_photos")
+        if self.photo_model_xyz is None:
+            record.pop("photo_model_xyz")
         return record
 
 

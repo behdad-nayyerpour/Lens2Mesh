@@ -122,6 +122,7 @@ class OrthoView(QWidget):
         self.marker_heights = {}
         self.active_marker = None
         self._hovered_flag = None
+        self._context_flag = None
         self._flag_pointer = None
         self.layers = {}                  # kind -> RasterLayer
         self.vis = {"ortho": True, "dem": True, "dtm": False, "markers": True, "marker_labels": True, "shapes": True}
@@ -178,7 +179,7 @@ class OrthoView(QWidget):
         self.selected_shape = None
         self.active_marker = None
         self.marker_heights.clear()
-        self._hovered_flag = self._flag_pointer = None
+        self._hovered_flag = self._context_flag = self._flag_pointer = None
         self._status_timer.stop()
         self.center = None; self.scale = 1.0
         self.coord_text = ""; self.last_world = None; self._drag = None
@@ -210,8 +211,8 @@ class OrthoView(QWidget):
         return flag_at(x, y, ((label, *self.to_screen(X, Y)) for label, X, Y in self.markers))
 
     def _update_flag_hover(self):
-        label = None
-        if self._flag_pointer is not None and not getattr(self, "survey_enabled", False):
+        label = self._context_flag
+        if label is None and self._flag_pointer is not None and not getattr(self, "survey_enabled", False):
             label = self.marker_at(*self._flag_pointer)
         if label != self._hovered_flag:
             self._hovered_flag = label
@@ -601,9 +602,9 @@ class OrthoView(QWidget):
             for lab, X, Y in self.markers:
                 x, y = self.to_screen(X, Y)
                 if -20 < x < self.width() + 20 and -20 < y < self.height_px() + 20:
-                    col = color(self.marker_states.get(lab, "predicted"))
                     hovered = lab == self._hovered_flag and not getattr(self, "survey_enabled", False)
-                    draw_flag(p, x, y, HOVER_COLOR if hovered else col, lab == self.active_marker)
+                    col = HOVER_COLOR if hovered else color(self.marker_states.get(lab, "predicted"))
+                    draw_flag(p, x, y, col, lab == self.active_marker)
                     if self.vis.get("marker_labels", True):
                         rect = p.fontMetrics().boundingRect(str(lab)).adjusted(-4, -2, 4, 2)
                         rect.moveBottomLeft(QPointF(x + 18, y - 18).toPoint())
@@ -829,7 +830,13 @@ class OrthoView(QWidget):
                 lambda: self.markerAction.emit("select", label))
             menu.addAction("Copy GCP coordinate").triggered.connect(lambda: self.copy_coordinates(x, y, z))
         menu.addAction("Reset view").triggered.connect(self.fit)
-        menu.exec(e.globalPos())
+        # Keep the target highlighted while the popup owns the cursor.
+        self._context_flag = label
+        try:
+            menu.exec(e.globalPos())
+        finally:
+            self._context_flag = None
+            self._update_flag_hover()
 
     def copy_coordinates(self, X, Y, Z=None):
         txt = f"{X:.3f}\t{Y:.3f}" + (f"\t{Z:.3f}" if Z is not None else "")
