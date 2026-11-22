@@ -2,6 +2,7 @@
 Markers, point cloud filtering and tie point gradual selection."""
 from __future__ import annotations
 
+import copy
 import json
 import os
 
@@ -127,11 +128,6 @@ class ReferenceMixin:
         """Marker position in the model frame: reference (if georeferenced),
         else triangulated from its projections."""
         # Display the observed estimate, independently of the surveyed target.
-        from .photonames import photo_dimensions
-        try:
-            g.validate_projection_dimensions(model, photo_dimensions(self.dataset))
-        except ValueError:
-            return None
         try:
             X, _n = g.triangulate_marker(model, m.projections, names, measured_only=True)
             if X is None:
@@ -170,17 +166,22 @@ class ReferenceMixin:
                 tuple((c.colmap_name, c.path, c.width, c.height) for c in self.dataset.cameras))
         cache = getattr(self, "_marker_xyz_cache", None)
         if cache is None or cache[0] != key0:
+            from .photonames import photo_dimensions
+            try:
+                g.validate_projection_dimensions(model, photo_dimensions(self.dataset))
+            except ValueError:
+                return None
             cache = self._marker_xyz_cache = (key0, {})
         names = None
         pts = []                       # (label, xyz, enabled=control)
         for m in self._marker_objs():
-            k = (m.label, _json.dumps(m.ref), _json.dumps(m.projections, sort_keys=True))
-            if k not in cache[1]:
+            signature = (_json.dumps(m.ref), _json.dumps(m.projections, sort_keys=True))
+            previous = cache[1].get(m.label)
+            if previous is None or previous[0] != signature:
                 names = names or g.name_index(model)
-                X = self._marker_model_xyz(m, model, names)
-                cache[1][k] = None if X is None else np.asarray(X, float)
-            if cache[1][k] is not None:
-                pts.append((m.label, cache[1][k], bool(m.enabled)))
+                previous = cache[1][m.label] = (signature, self._marker_model_xyz(m, model, names))
+            if previous[1] is not None:
+                pts.append((m.label, previous[1], bool(m.enabled)))
         return pts
 
     def _show_markers_3d(self, items):
@@ -193,7 +194,6 @@ class ReferenceMixin:
 
     def _update_view_markers(self):
         self._show_markers_3d(self._marker_positions())
-        self._marker_selection_changed()
         self._update_ortho_markers()
 
     def _marker_selection_changed(self):
@@ -201,57 +201,102 @@ class ReferenceMixin:
         labels = self.markers_pane.selected_labels()
         self.ortho_view.set_active_marker(labels[0] if len(labels) == 1 else None)
 
-    def _update_photo_markers(self):
-        k = getattr(self, "current_photo", -1)
-        cams = self.dataset.cameras
-        if not (0 <= k < len(cams)) or self.photo_view.path is None:
-            return
-        stem = self._photo_marker_key(k)
-        if stem is None:
-            self.photo_view.set_markers([], self.markers_pane.current_label())
-            return
-        items = []
-        model = None
+    def _photo_gcp_context(self):
+        """Source identities and calibrated photo models for display and filtering."""
+        from .photonames import marker_camera_keys
+
         try:
             model = self._sparse_model()
-        except Exception:
-            pass
-        names = g.name_index(model) if model is not None else {}
-        for m in self._marker_objs():
-            p = {g._stem(a): v for a, v in m.projections.items()}.get(stem)
-            if p is not None:
-                kind = "predicted" if m.disabled or not g.projection_is_measured(p) else ("pinned" if len(p) < 3 or p[2] else "placed")
-                items.append((m.label, p[0], p[1], kind))
-            elif model is not None and stem in names:
-                X = self._marker_model_xyz(m, model, names)
-                if X is not None:
-                    q = g.predict_projection(model, names[stem], X)
-                    if q is not None:
-                        items.append((m.label, q[0], q[1], "predicted"))
-        for key in ("markers", "marker_labels"):          # keep in step with the Show Markers toggles
+        except (OSError, ValueError):
+            model = None
+        cameras = self.dataset.cameras
+        key = (id(model), tuple((c.path, c.colmap_name, c.width, c.height) for c in cameras))
+        cached = getattr(self, "_gcp_photo_context_cache", None)
+        if cached is None or cached[0] != key:
+            names = g.name_index(model) if model is not None else {}
+            keys = marker_camera_keys(self.dataset)
+            cached = self._gcp_photo_context_cache = (key, model, keys, names, {})
+        return cached
+
+    def _photo_gcp_location(self, marker, stored, index, stem, model, names, xyz):
+        """(u, v, status) in original pixels, for flags, photo filtering and counts."""
+        ignored = marker.disabled or stem in marker.ignored_photos
+        p = stored.get(stem)
+        if p is not None:
+            uv = p[:2]
+            state = ("pinned" if g.projection_is_pinned(p) else
+                     "placed" if g.projection_is_refined(p) else "predicted")
+        elif xyz is not None and stem in names:
+            iid = names[stem]
+            uv = g.predict_projection(model, iid, xyz)
+            if uv is None:
+                return None
+            source = self.dataset.cameras[index]
+            calibrated = model.cameras[model.images[iid].camera_id]
+            if source.width and source.height:
+                uv = (uv[0] * source.width / calibrated.width,
+                      uv[1] * source.height / calibrated.height)
+            state = "predicted"
+        else:
+            return None
+        source = self.dataset.cameras[index]
+        if not np.isfinite(uv).all() or (source.width and source.height and
+                                        not (0 <= uv[0] < source.width and 0 <= uv[1] < source.height)):
+            return None
+        return float(uv[0]), float(uv[1]), "ignored" if ignored else state
+
+    def _gcp_photo_locations(self, labels):
+        """Compute all visible locations only for points requested by the GCP panel."""
+        _, model, keys, names, cache = self._photo_gcp_context()
+        positions = {label: xyz for label, xyz, _ in self._marker_positions() or ()}
+        selected = set(labels)
+        for marker in self._marker_objs():
+            if marker.label not in selected:
+                continue
+            xyz = positions.get(marker.label)
+            signature = (marker.projections, marker.disabled, marker.ignored_photos,
+                         None if xyz is None else tuple(xyz))
+            previous = cache.get(marker.label)
+            if previous is None or previous[0] != signature:
+                stored = {g._stem(name): value for name, value in marker.projections.items()}
+                locations = {}
+                for index, stem in keys.items():
+                    location = self._photo_gcp_location(marker, stored, index, stem, model, names, xyz)
+                    if location is not None:
+                        locations[index] = location
+                # Cache independent values since the current project projections remain editable.
+                previous = cache[marker.label] = (copy.deepcopy(signature), locations)
+            yield previous[1]
+
+    def marker_prediction_count(self, label):
+        return sum(state == "predicted" for locations in self._gcp_photo_locations([label])
+                   for _, _, state in locations.values())
+
+    def _update_photo_markers(self):
+        k = getattr(self, "current_photo", -1)
+        if self.photo_view.path is None or not (0 <= k < len(self.dataset.cameras)):
+            return
+        _, model, keys, names, _cache = self._photo_gcp_context()
+        stem = keys.get(k)
+        points = self._marker_objs()
+        items, ignored_here, ignored_all = [], set(), set()
+        if stem is not None:
+            positions = {label: xyz for label, xyz, _ in self._marker_positions() or ()}
+            for marker in points:
+                stored = {g._stem(name): value for name, value in marker.projections.items()}
+                location = self._photo_gcp_location(marker, stored, k, stem, model, names,
+                                                    positions.get(marker.label))
+                if location is not None:
+                    items.append((marker.label, *location))
+                if marker.disabled:
+                    ignored_all.add(marker.label)
+                if stem in marker.ignored_photos:
+                    ignored_here.add(marker.label)
+        for key in ("markers", "marker_labels"):
             self.photo_view.set_visible(key, self.layer_action(key).isChecked())
-        self.photo_view.set_markers(
-            items, self.markers_pane.current_label(),
-            [m.label for m in self._marker_objs() if not m.disabled])
-
-    def place_marker(self, u, v):
-        label = self.markers_pane.current_label()
-        if label:
-            self.pin_marker(label, u, v, k=self.current_photo)
-
-    def remove_marker_projection(self, label):
-        k = self.current_photo
-        if not (0 <= k < len(self.dataset.cameras)):
-            return
-        stem = self._photo_marker_key(k)
-        if stem is None:
-            return
-        ms = self._marker_objs()
-        self._markers_snapshot()
-        for m in ms:
-            if m.label == label:
-                m.projections = {a: b for a, b in m.projections.items() if g._stem(a) != stem}
-        self._commit_markers(ms)
+        self.photo_view.set_markers(items, self.markers_pane.current_label(),
+                                    [m.label for m in points] if stem is not None else (),
+                                    ignored_here=ignored_here, ignored_all=ignored_all)
 
     def toggle_marker(self, label, enabled):
         ms = self._marker_objs()
@@ -280,21 +325,23 @@ class ReferenceMixin:
         dialog = GcpCoordinatesDialog(current, self)
         if not dialog.exec():
             return
-        target = dialog.selected_crs()
-        if target == current:
-            return
         points = self._marker_objs()
         try:
+            target = dialog.selected_crs()
             crs = g.CRS.parse(target)
+            if crs == g.CRS.parse(current):
+                self.statusBar().showMessage(f"GCP coordinate system is already {crs.name}", 4000)
+                return
             for point in points:
                 if point.ref is not None:
                     g.validate_control_reference(point, crs)
         except ValueError as error:
-            QMessageBox.warning(self, dialog.windowTitle(), str(error))
+            QMessageBox.warning(self, dialog.windowTitle(), f"Cannot assign the GCP coordinate system. {error}")
             return
         self._markers_snapshot()
         ch.reference_settings["gcp_crs"] = target
         self._commit_markers(points, f"GCP coordinate system assigned: {crs.name}")
+        self.statusBar().showMessage(f"GCP coordinate system assigned: {crs.name}", 4000)
 
     def import_markers(self, path=None):
         path = path or QFileDialog.getOpenFileName(
@@ -625,7 +672,6 @@ class ReferenceMixin:
         ch.tie_point_count = cm.count_points3d(os.path.join(wd, "sparse_txt", "points3D.txt"))
         self.model_view.set_z_up(bool(ch.georef))
         self.set_modified(); self.reload_view()
-        self.markers_pane.refresh(ch)
         self._update_view_markers()
 
     # ------------------------------------------------------------ refine
@@ -652,17 +698,24 @@ class ReferenceMixin:
             json.dump(cfg, f, default=float)
 
         def loaded():
-            res = json.load(open(cfg["output"], encoding="utf-8"))
+            with open(cfg["output"], encoding="utf-8") as result:
+                res = json.load(result)
             ms = self._marker_objs(); n = 0
             for m in ms:
+                if m.disabled or m.locked:
+                    continue
+                cur = {g._stem(a): a for a in m.projections}
                 for stem, (u, v, _pin, _sc, how) in (res.get(m.label) or {}).items():
-                    cur = {g._stem(a): a for a in m.projections}
-                    if stem in cur and (len(m.projections[cur[stem]]) < 3 or m.projections[cur[stem]][2]):
+                    if stem in m.ignored_photos:
+                        continue
+                    if stem in cur and g.projection_is_pinned(m.projections[cur[stem]]):
                         continue                     # never move a user-pinned placement
                     if how in ("saddle", "template"):
                         m.projections.pop(cur.get(stem, stem), None)
                         m.projections[stem] = [u, v, False, "refined"]; n += 1
-            self._commit_markers(ms)
+            if n:
+                self._markers_snapshot()
+                self._commit_markers(ms)
             self.log(f"Refine GCPs: {n} projections placed/refined (unpinned; pinned ones untouched)")
         self._run("Refine GCPs", [("Placing GCPs", [cm.PYTHON, "refine_markers", path], 100)], loaded)
 

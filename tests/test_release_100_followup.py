@@ -49,7 +49,7 @@ def test_marker_errors_have_separate_noneditable_summary(window):
     assert table.horizontalHeader().logicalIndex(1) == 8
     assert table.item(0, 8).text() == "Control" and table.item(2, 8).text() == "Check"
     assert table.item(0, 0).checkState() == Qt.Checked and table.item(2, 0).checkState() == Qt.Unchecked
-    assert table.item(0, 0).icon().isNull()
+    assert not table.item(0, 0).icon().isNull()
     summary = table.summary_table
     assert summary.rowCount() == 2 and summary.columnCount() == 3
     assert summary.item(0, 1).text() == "3.536" and summary.item(0, 2).text() == "3.606"

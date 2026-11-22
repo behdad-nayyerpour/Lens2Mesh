@@ -180,6 +180,7 @@ def _texts(pv):
 
 
 def test_photo_markers_follow_show_markers_and_labels(window):
+    from PySide6.QtCore import QPointF
     pv = _photo_with_markers(window)
     assert window.layer_action("markers").isChecked() and window.layer_action("marker_labels").isChecked()
     n_all = len(pv._overlay)
@@ -193,7 +194,7 @@ def test_photo_markers_follow_show_markers_and_labels(window):
     # Show Markers off: nothing at all, and hidden flags can't be picked
     window.set_layer_visible("markers", False)
     assert pv.vis["markers"] is False and pv._overlay == []
-    assert pv.markers_near(50, 40) == []
+    assert pv._flag_at(pv.view.mapFromScene(QPointF(50, 40))) is None
     assert window.ortho_view.vis["markers"] is False and window.model_view.show["markers"] is False
     # markers set while hidden stay hidden (e.g. switching photos)
     pv.set_markers([("A1", 50, 40, "pinned")], "A1")
@@ -202,7 +203,7 @@ def test_photo_markers_follow_show_markers_and_labels(window):
     window.set_layer_visible("markers", True); window.set_layer_visible("marker_labels", True)
     pv.set_markers([("A1", 50, 40, "pinned"), ("B2", 120, 90, "predicted"), ("C3", 150, 30, "placed")], "A1")
     assert len(pv._overlay) == n_all and len(_texts(pv)) == 3
-    assert pv.markers_near(50, 40)
+    assert pv._flag_at(pv.view.mapFromScene(QPointF(50, 40))) == "A1"
 
 
 def test_photo_markers_hidden_from_the_toolbar_toggle(window):

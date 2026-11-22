@@ -14,12 +14,12 @@ def test_import_markers_and_place(window, image_dir, tmp_path, no_dialogs):
     assert not window.dataset.crs
     window.open_photo(0)
     window.markers_pane.selectRow(0)
-    window.place_marker(12.5, 34.0)
+    window.photo_view.ctrl_click(12.5, 34.0)
     lab = window.markers_pane.item(0, 0).text()
     m = [m for m in window.dataset.markers if m["label"] == lab][0]
     assert list(m["projections"].values()) == [[12.5, 34.0, True]]
     assert any(x[0] == lab and x[3] == "pinned" for x in window.photo_view.markers)
-    window.remove_marker_projection(lab)
+    assert window.marker_view_action("ignore_photo", lab)
     m = [m for m in window.dataset.markers if m["label"] == lab][0]
     assert m["projections"] == {}
     window.toggle_marker(lab, False)

@@ -152,6 +152,15 @@ class Project:
         """base = folder of the .pmsx: paths below it are written relative
         (portable project folder); photos/products elsewhere stay absolute."""
         datasets = [asdict(c) for c in self.datasets]
+        for cd in datasets:
+            # Keep marker records readable by installations predating scoped ignores.
+            ignored = {}
+            for marker in cd.get("markers") or ():
+                photos = marker.pop("ignored_photos", None)
+                if photos:
+                    ignored[marker["label"]] = photos
+            if ignored:
+                cd["gcp_ignored_photos"] = ignored
         if base:
             for cd in datasets:
                 for k in DATA_PATHS:
@@ -221,6 +230,12 @@ class Project:
                 for key in keys:
                     if isinstance(metadata.get(key), str):
                         metadata[key] = _resolve(metadata[key], base)
+            ignored = cd.get("gcp_ignored_photos")
+            if isinstance(ignored, dict):
+                for marker in cd.get("markers") or ():
+                    photos = ignored.get(marker.get("label"))
+                    if isinstance(photos, list) and all(isinstance(name, str) for name in photos):
+                        marker["ignored_photos"] = photos
             cd = {k: v for k, v in cd.items() if k in known}
             # paths saved relative (0.1.7+, benchmark.py) are relative to the project file
             for k in DATA_PATHS:

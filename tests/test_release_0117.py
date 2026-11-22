@@ -68,7 +68,9 @@ def test_marker_menu_edits_only_photos_and_spatial_views_only_select(window,tmp_
     window.marker_view_action("ignore",label,"photo")
     assert _marker(window,label)["disabled"] is True
     assert _marker(window,label)["enabled"] is True
-    window.marker_view_action("use",label,"photo")
+    assert not _marker(window, label)["projections"]
+    assert window.undo_markers()
+    assert _marker(window, label)["projections"]
     before=copy.deepcopy(window.dataset.markers); history=len(window._mk_undo)
     for name,view in (("ortho",window.ortho_view),("model",window.model_view)):
         for action in ("ignore","use","pin","move","delete"):

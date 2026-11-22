@@ -78,7 +78,7 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
 
     pane.selectRow(0)
     panel = window.docks["Markers"].widget()
-    assert any("Auto placements: 1 · Predictions: 1" in label.text() for label in panel.findChildren(QLabel))
+    assert any("Auto placements: 1 · Predictions: 0" in label.text() for label in panel.findChildren(QLabel))
     buttons = {button.text(): button for button in panel.findChildren(QPushButton)}
     buttons["Open photos"].click()
     assert window.photos.visible_indices() == [0, 1]
@@ -93,7 +93,12 @@ def test_ground_control_panel_placements_and_photo_buttons(window, tmp_path, mon
 
     monkeypatch.setattr(panes, "QMenu", InspectableMenu)
     pane._menu(QPoint(0, 0))
-    assert menu_actions == ["Add GCP", "Rename GCP...", "Remove GCPs"]
+    assert menu_actions == ["Add GCP", "Rename GCP", "Remove GCP", "Ignore GCP (in all photos)",
+                            "Open photos", "All photos"]
+    assert not pane.item(0, 0).icon().isNull()
+    assert pane.item(0, 9).foreground().style() == panes.Qt.NoBrush
+    assert {"Import GCPs…", "Add GCP", "Change…"} <= set(buttons)
+    assert not any(label.text() == "Control coordinates" for label in panel.findChildren(QLabel))
     assert buttons["Clear auto placements"].isEnabled()
     buttons["Clear auto placements"].click()
     assert set(_marker(window, "P12")["projections"]) == {"img_0001", "other"}
@@ -232,7 +237,7 @@ def test_rename_remove_filter_and_workspace_menu(window, tmp_path):
 
 
 def test_photo_flags_kinds_ctrl_click_and_context(window, tmp_path):
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPointF
     _scene(window, tmp_path)
     window.open_photo(1)
     pv = window.photo_view
@@ -246,7 +251,7 @@ def test_photo_flags_kinds_ctrl_click_and_context(window, tmp_path):
     flags = [item for item in pv._overlay if hasattr(item, "colour") and item.zValue() == 7]
     assert [item.colour.name() for item in flags] == ["#28dc3c", "#3c8cff", "#bebebe"]
     assert all(item.pos().y() == 100 for item in flags)  # exact ground position is the item origin
-    assert [m[0] for m in pv.markers_near(105, 100)] == ["A"]
+    assert pv._flag_at(pv.view.mapFromScene(QPointF(105, 100))) == "A"
     # pinning a blue flag through the window keeps one projection per photo and pins it
     lab = window.add_marker_at_photo(500.0, 400.0, k=0)
     assert _marker(window, lab)["projections"]["img_0002"][2] is False
@@ -292,3 +297,168 @@ def test_parse_helpers():
     V = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float)
     assert ray_mesh(V, np.array([[0, 1, 2]]), [0.2, 0.2, 5], [0, 0, -1]) == pytest.approx(5.0)
     assert ray_mesh(V, np.array([[0, 1, 2]]), [2, 2, 5], [0, 0, -1]) is None
+
+
+def test_dynamic_prediction_filter_and_scoped_ignore_survive_reopen(window, tmp_path, monkeypatch):
+    from photomesh import tasks
+    from photomesh.project import Project
+
+    ch = _scene(window, tmp_path)
+    model = window._sparse_model()
+    xyz = [120., 100., 0.]
+    pixels = {i: g.predict_projection(model, i, xyz) for i in model.images}
+    marker = g.Marker("G1", xyz, projections={
+        "IMG_0001.JPG": [*pixels[1], True], "IMG_0003.JPG": [*pixels[3], True]})
+    ch.crs = "LOCAL"
+    ch.georef = {"offset": [0., 0., 0.], "crs": "LOCAL"}
+    window._commit_markers([marker])
+    window.open_photo(1)
+    assert window.marker_prediction_count("G1") == 1
+    assert window.photo_view.markers[0][-1] == "predicted"
+    assert window.filter_photos_by_markers(["G1"]) == {0, 1, 2}
+    assert window.pin_marker("G1", *pixels[2])
+    assert window.photo_view.markers[0][-1] == "pinned"
+
+    assert window.marker_view_action("ignore_photo", "G1")
+    assert not window.marker_view_action("ignore_photo", "G1")
+    saved = _marker(window, "G1")
+    assert saved["ignored_photos"] == ["img_0002"]
+    assert set(map(g._stem, saved["projections"])) == {"img_0001", "img_0003"}
+    assert window.photo_view.markers[0][-1] == "ignored"
+    assert window.marker_prediction_count("G1") == 0
+    assert window.photos.visible_indices() == [0, 1, 2]
+    assert window.dataset.georef["marker_image_errors"]["G1"]["n"] == 2
+
+    project_path = str(tmp_path / "placement.pmsx")
+    window.project.save(project_path)
+    with open(project_path, encoding="utf-8") as project_file:
+        dataset_record = json.load(project_file)["datasets"][0]
+    assert "ignored_photos" not in dataset_record["markers"][0]
+    assert dataset_record["gcp_ignored_photos"] == {"G1": ["img_0002"]}
+    reloaded = Project.load(project_path).dataset.markers[0]
+    assert reloaded == saved
+    xml_path = tmp_path / "placement.xml"
+    g.write_markers_xml(xml_path, [g.Marker(**reloaded)], "LOCAL")
+    imported, _ = g.read_markers_xml(xml_path)
+    assert imported[0].ignored_photos == ["img_0002"]
+    assert g.merge_markers(imported, [g.Marker("G1", projections={
+        "img_0002": [*pixels[2], True]})])[0].projections == saved["projections"]
+
+    planned = {}
+    def capture_plan(_model, _root, plan, **_options):
+        planned.update(plan)
+        return {}
+    monkeypatch.setattr("photomesh.marker_refine.crop_views", capture_plan)
+    monkeypatch.setattr("photomesh.marker_refine.auto_place", lambda *args, **kwargs: {})
+    tasks.cmd_refine_markers({"model": window._model_dir(), "image_root": str(tmp_path),
+                              "markers": [saved], "positions": {"G1": xyz},
+                              "output": str(tmp_path / "refined.json")})
+    assert planned and 2 not in planned
+    assert window.undo_markers()
+    assert window.photo_view.markers[0][-1] == "pinned"
+    assert window.redo_markers()
+    assert window.photo_view.markers[0][-1] == "ignored"
+
+    assert window.marker_view_action("ignore", "G1")
+    assert window.dataset.markers[0]["disabled"] and not window.dataset.markers[0]["projections"]
+    assert window.dataset.markers[0]["ref"] == xyz
+    assert not window.dataset.georef["marker_image_errors"]
+    assert window.pin_marker("G1", *pixels[2])
+    assert not window.dataset.markers[0]["disabled"]
+    assert window.dataset.markers[0]["projections"] == {"img_0002": [*pixels[2], True]}
+
+
+def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtWidgets import QGraphicsView, QMenu
+    from photomesh import views
+
+    _scene(window, tmp_path)
+    window.open_photo(0)
+    view = window.photo_view
+    canvas = view.view.viewport()
+    assert view.view.dragMode() == QGraphicsView.NoDrag
+    assert canvas.cursor().shape() == Qt.ArrowCursor
+    view.set_markers([("pinned", 500, 400, "pinned"), ("local", 620, 400, "ignored"),
+                      ("global", 380, 400, "ignored"), ("auto", 750, 400, "placed")],
+                     available=["pinned", "local", "global", "auto"],
+                     ignored_here={"local"}, ignored_all={"global"})
+
+    menus = []
+    class InspectableMenu(QMenu):
+        def exec(self, _position):
+            menus.append([(action.text(), action.isEnabled(),
+                           [(sub.text(), sub.isEnabled()) for sub in action.menu().actions()]
+                           if action.menu() else None) for action in self.actions()])
+    monkeypatch.setattr(views, "QMenu", InspectableMenu)
+
+    def on_point(u):
+        return view.view.mapFromScene(QPointF(u, 400)) + QPoint(3, -17)
+
+    qtbot.mouseMove(canvas, on_point(500))
+    assert view._flags["pinned"].hovered
+    qtbot.mouseMove(canvas, on_point(620))
+    assert view._flags["local"].hovered and not view._flags["pinned"].hovered
+    for u in (500, 620, 380, 750):
+        view._context(on_point(u))
+    colors = [menu[0][1] for menu in menus]
+    assert colors == [False, True, True, True]
+    assert [name for name, _, _ in menus[0]] == [
+        "Pin GCP", "Move GCP", "Ignore GCP", "Delete GCP", "Show GCP on table"]
+    assert menus[1][2][2] == [("only from this photo", False), ("From all photos", True)]
+    assert menus[2][2][2] == [("only from this photo", False), ("From all photos", False)]
+    blank = view.view.mapFromScene(QPointF(500, 550))
+    qtbot.mouseMove(canvas, blank)
+    assert not any(flag.hovered for flag in view._flags.values())
+    view._context(blank)
+    assert [name for name, _, _ in menus[-1]] == ["Add GCP", "Place Existing GCP"]
+
+    view.zoom(3)
+    scrollbar = view.view.horizontalScrollBar()
+    start_value = scrollbar.value()
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    start = canvas.rect().center()
+    qtbot.mousePress(canvas, Qt.LeftButton, pos=start)
+    end = QPointF(start + QPoint(40, 0))
+    QApplication.sendEvent(canvas, QMouseEvent(QEvent.MouseMove, end, end, Qt.NoButton,
+                                               Qt.LeftButton, Qt.NoModifier))
+    qtbot.mouseRelease(canvas, Qt.LeftButton, pos=end.toPoint())
+    assert scrollbar.value() < start_value
+    assert canvas.cursor().shape() == Qt.ArrowCursor
+
+
+def test_photo_reports_mesh_coordinates_and_original_image_pixels(window, tmp_path, qtbot):
+    import re
+    from PySide6.QtCore import QPointF
+
+    ch = _scene(window, tmp_path)
+    ch.model_ply = _ground_ply(str(tmp_path / "ground.ply"))
+    ch.georef = {"offset": [1000., 2000., 50.], "crs": "LOCAL"}
+    window.open_photo(0)
+    view = window.photo_view
+
+    def assert_cursor():
+        screen = view.view.mapFromScene(QPointF(500, 400))
+        pixel = view.view.mapToScene(screen)
+        qtbot.mouseMove(view.view.viewport(), screen)
+        qtbot.waitUntil(lambda: "Z: 50.000 m" in view.coordinates.text(), timeout=30000)
+        lines = view.coordinates.text().splitlines()
+        assert len(lines) == 2
+        model_xyz = [float(value.replace(",", "")) for value in re.findall(r": ([0-9,.]+)", lines[0])]
+        assert model_xyz == pytest.approx([1100 + (pixel.x() - 500) * .06,
+                                          2100 - (pixel.y() - 400) * .06, 50], abs=.002)
+        assert lines[1] == f"Photo: X: {pixel.x():.2f} px  Y: {pixel.y():.2f} px"
+
+    assert_cursor()
+    view.zoom(2)
+    view.rotate(90)
+    view._clear_photo_cursor()
+    qtbot.mouseMove(view.view.viewport(), view.view.mapFromScene(QPointF(520, 410)))
+    assert_cursor()
+    ch.cameras[1].aligned = False
+    window.open_photo(1)
+    qtbot.mouseMove(view.view.viewport(), view.view.mapFromScene(QPointF(540, 400)))
+    qtbot.waitUntil(lambda: "px" in view.coordinates.text(), timeout=3000)
+    assert view.coordinates.text().splitlines()[0] == "Model: —"

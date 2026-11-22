@@ -1,26 +1,32 @@
-"""Shared marker states and actions for Photo, Ortho and Model views."""
+"""Shared GCP flag geometry and colors for Photo, Ortho and Model views."""
 from PySide6.QtGui import QColor
-from .georef import projection_is_measured
+from .georef import projection_is_pinned, projection_is_refined
 
 COLORS = {"pinned": (40, 220, 60), "placed": (60, 140, 255), "predicted": (190, 190, 190)}
 
 def marker_state(marker):
     if marker.get("disabled", False):
         return "predicted"
-    if marker.get("locked", False) or any(len(v) < 3 or v[2] for v in marker.get("projections", {}).values()):
+    if marker.get("locked", False) or any(projection_is_pinned(v) for v in marker.get("projections", {}).values()):
         return "pinned"
-    return "placed" if any(projection_is_measured(v) for v in marker.get("projections", {}).values()) else "predicted"
+    return "placed" if any(projection_is_refined(v) for v in marker.get("projections", {}).values()) else "predicted"
 
 def color(state):
     return QColor(*COLORS.get(state, COLORS["predicted"]))
 
-def marker_menu(menu, label, callback):
-    """Actions act on the marker hit by the cursor, never an unrelated active row."""
-    for text, action in (("Delete Marker", "delete"), ("Pin Marker", "pin"),
-                         ("Ignore Marker", "ignore"), ("Use Marker", "use"),
-                         ("Move Marker...", "move")):
-        menu.addAction(f"{text}: {label}").triggered.connect(
-            lambda _checked=False, action=action: callback(action, label))
+HOVER_COLOR = QColor(255, 65, 59)
+
+
+def flag_at(x, y, anchors):
+    """Resolve overlapping flags using the same screen geometry for hover and clicks."""
+    nearest = None
+    for label, sx, sy in anchors:
+        dx, dy = x - sx, y - sy
+        if -5 <= dx <= 18 and -27 <= dy <= 6:
+            hit = (dx * dx + dy * dy, label)
+            if nearest is None or hit < nearest:
+                nearest = hit
+    return nearest[1] if nearest is not None else None
 
 
 def draw_flag(painter, x, y, colour, active=False):

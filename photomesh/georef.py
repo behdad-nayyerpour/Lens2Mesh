@@ -227,9 +227,23 @@ class Marker:
     est: list | None = None              # estimated position (CRS units)
     disabled: bool = False               # excluded from adjustment/report, independent of Control/Check
     locked: bool = False                 # explicit user lock against accidental repositioning
+    ignored_photos: list[str] = field(default_factory=list)  # unambiguous source-photo stems
+
+    def __post_init__(self):
+        self.ignored_photos = sorted({name.lower() for name in self.ignored_photos})
+        self.discard_ignored_placements()
+
+    def discard_ignored_placements(self):
+        if self.ignored_photos:
+            ignored = set(self.ignored_photos)
+            self.projections = {name: placement for name, placement in self.projections.items()
+                                if name.lower() not in ignored and _stem(name) not in ignored}
 
     def to_dict(self):
-        return asdict(self)
+        record = asdict(self)
+        if not self.ignored_photos:
+            record.pop("ignored_photos")
+        return record
 
 
 def _stem(name):
@@ -365,6 +379,7 @@ def read_markers_xml(path):
             m.enabled = mk.get("enabled", "true").lower() != "false"
             m.disabled = mk.get("disabled", "false").lower() == "true"
             m.locked = mk.get("locked", "false").lower() == "true"
+            m.ignored_photos = [item.get("label") for item in mk.findall("ignored-photo") if item.get("label")]
         if ref is not None:
             m.enabled = ref.get("enabled", "true").lower() != "false"
             if ref.get("sx"):
@@ -382,7 +397,7 @@ def read_markers_xml(path):
                                           loc.get("pinned", "true").lower() == "true"]
                     if root.tag == "photomesh-reference" and loc.get("source") in ("predicted", "refined"):
                         m.projections[lab].append(loc.get("source"))
-    return list(byid.values()), crs
+    return [Marker(**m.to_dict()) for m in byid.values()], crs
 
 
 def write_markers_xml(path, markers, crs_text=""):
@@ -399,6 +414,8 @@ def write_markers_xml(path, markers, crs_text=""):
     for k, m in enumerate(markers):
         mk = ET.SubElement(mks, "marker", id=str(k), label=m.label, enabled=str(m.enabled).lower(),
                            disabled=str(m.disabled).lower(), locked=str(m.locked).lower())
+        for name in m.ignored_photos:
+            ET.SubElement(mk, "ignored-photo", label=name)
         if m.ref is not None:
             a = {"x": repr(float(m.ref[0])), "y": repr(float(m.ref[1])), "z": repr(float(m.ref[2])),
                  "enabled": "true" if m.enabled else "false"}
@@ -412,7 +429,7 @@ def write_markers_xml(path, markers, crs_text=""):
             continue
         e = ET.SubElement(fm, "marker", marker_id=str(k))
         for p, v in m.projections.items():
-            ET.SubElement(e, "location", camera_id=str(pid[p]), pinned="true" if (len(v) < 3 or v[2]) else "false",
+            ET.SubElement(e, "location", camera_id=str(pid[p]), pinned="true" if projection_is_pinned(v) else "false",
                           x=repr(float(v[0])), y=repr(float(v[1])),
                           **({"source": v[3]} if len(v) > 3 and v[3] in ("predicted", "refined") else {}))
     if crs_text:
@@ -428,7 +445,10 @@ def read_projections_csv(path, markers):
         if len(r) < 4 or _num(r[2]) is None:
             continue
         m = by.setdefault(r[0].strip(), Marker(r[0].strip()))
-        m.projections[r[1].strip()] = [float(r[2]), float(r[3]), (r[4].strip().lower() != "false") if len(r) > 4 else True]
+        name = r[1].strip()
+        if m.disabled or _stem(name) in m.ignored_photos:
+            continue
+        m.projections[name] = [float(r[2]), float(r[3]), (r[4].strip().lower() != "false") if len(r) > 4 else True]
         n += 1
     return [m for m in by.values()], n
 
@@ -448,7 +468,13 @@ def merge_markers(existing, new):
             o = by[m.label]
             if m.ref is not None:
                 o.ref, o.acc, o.enabled = m.ref, m.acc or o.acc, m.enabled
-            o.projections.update(m.projections)
+            if m.disabled:
+                o.disabled = True
+                o.projections.clear()
+            elif not o.disabled:
+                o.projections.update(m.projections)
+            o.ignored_photos = sorted(set(o.ignored_photos) | set(m.ignored_photos))
+            o.discard_ignored_placements()
         else:
             existing.append(m); by[m.label] = m
     return existing
@@ -546,13 +572,18 @@ def validate_projection_dimensions(model, photo_sizes=None):
                              "before measuring or optimizing GCPs.")
 
 
+def projection_is_pinned(value):
+    """Legacy two-value observations are manual pins."""
+    return len(value) < 3 or bool(value[2])
+
+
 def projection_is_refined(value):
     return len(value) > 3 and not value[2] and value[3] == "refined"
 
 
 def projection_is_measured(value):
     """Pins and image-refined locations are measurements; predictions/unknowns are not."""
-    return len(value) < 3 or bool(value[2]) or projection_is_refined(value)
+    return projection_is_pinned(value) or projection_is_refined(value)
 
 
 def marker_image_observations(model, projections, names=None, measured_only=False):
@@ -572,7 +603,7 @@ def marker_image_observations(model, projections, names=None, measured_only=Fals
             camera = model.cameras[model.images[iid].camera_id]
             if not (0 <= uv[0] < camera.width and 0 <= uv[1] < camera.height):
                 raise ValueError(f"GCP observation lies outside source photo {label}")
-        pinned = len(value) < 3 or bool(value[2])
+        pinned = projection_is_pinned(value)
         if iid in observations:
             old, old_pin = observations[iid]
             if old_pin == pinned and not np.allclose(old, uv, rtol=0, atol=1e-7):

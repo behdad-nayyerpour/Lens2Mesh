@@ -101,6 +101,9 @@ def cmd_refine_markers(cfg):
     markers = [g.Marker(**m) for m in cfg["markers"]]
     plan, Xs = {}, {}
     for m in markers:
+        if m.disabled:
+            continue
+        ignored = set(m.ignored_photos)
         X = None
         pos = (cfg.get("positions") or {}).get(m.label)
         if pos is not None:
@@ -112,7 +115,9 @@ def cmd_refine_markers(cfg):
         if X is None:
             continue
         Xs[m.label] = X
-        for iid in model.images:
+        for iid, image in model.images.items():
+            if g._stem(image.name) in ignored:
+                continue
             p = g.predict_projection(model, iid, X)
             cam = model.cameras[model.images[iid].camera_id]
             if p is None or not (40 <= p[0] < cam.width - 40 and 40 <= p[1] < cam.height - 40):
@@ -127,7 +132,7 @@ def cmd_refine_markers(cfg):
             continue
         ids = [iid for iid in model.images if (m.label, iid) in views]
         pins = {names[g._stem(p)]: (v[0], v[1]) for p, v in m.projections.items()
-                if g._stem(p) in names and (len(v) < 3 or v[2])}
+                if g._stem(p) in names and g.projection_is_pinned(v)}
         res = mr.auto_place(model, cfg["image_root"], Xs[m.label], [i for i in ids if i not in pins],
                             pinned=pins or None, method="auto", search=int(cfg.get("search", 25)),
                             views=lambda i, lab=m.label: views.get((lab, i)))

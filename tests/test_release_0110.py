@@ -371,6 +371,10 @@ def test_gui_old_project_names_recovered_on_open(window, no_dialogs, tmp_path):
     from photomesh import colmap as cm
     from photomesh.project import Project
     ch = _dup_dataset(tmp_path)
+    # Copy fallback on systems that disallow links also needs distinct stamps.
+    for index, camera in enumerate(ch.cameras):
+        stamp = 1_700_000_000 + 2 * index
+        os.utime(camera.path, (stamp, stamp))
     prj = Project(); prj.datasets = [ch]; prj.path = str(tmp_path / "old.pmsx")
     m = cm.prepare_images(ch, prj.default_workdir(ch))
     for c in ch.cameras:

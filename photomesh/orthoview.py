@@ -6,7 +6,7 @@ threads, and cached (LRU); while a tile loads, the matching part of a coarser
 level is drawn instead, so panning / zooming never blocks the GUI.
 The cursor position is shown in REAL world coordinates (offset included) with
 Z from the DEM (or the orthomosaic's height grid) in a corner overlay and in
-the status bar (coordinatesChanged signal); right-click > Copy Coordinates.
+the status bar (coordinatesChanged signal); right-click > Copy coordinate.
 Without a raster the view stays empty except for imported vector overlays."""
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from PySide6.QtGui import QPainter, QColor, QFont, QImage, QPen, QGuiApplication
 from PySide6.QtWidgets import QWidget, QMenu
 
 from . import geotiff as gt
+from .marker_style import HOVER_COLOR, color, draw_flag, flag_at
 
 _DEM_STOPS = np.array([[0.0, 40, 90, 180], [0.25, 60, 170, 200], [0.5, 90, 190, 90], [0.75, 230, 210, 80],
                        [1.0, 200, 80, 50]], np.float32)
@@ -46,7 +47,7 @@ def format_coords(X, Y, Z=None, geographic=False, unit="m"):
         u = f" {unit}" if unit else ""
         s = f"X: {X:,.3f}{u}  Y: {Y:,.3f}{u}"
     if Z is not None and np.isfinite(Z):
-        s += f"  Z: {Z:,.3f} m"
+        s += f"  Z: {Z:,.3f}" + (f" {unit}" if unit else "")
     return s
 
 
@@ -118,7 +119,10 @@ class OrthoView(QWidget):
         self.stale_message = ""
         self._moving_marker = None
         self.marker_states = {}
+        self.marker_heights = {}
         self.active_marker = None
+        self._hovered_flag = None
+        self._flag_pointer = None
         self.layers = {}                  # kind -> RasterLayer
         self.vis = {"ortho": True, "dem": True, "dtm": False, "markers": True, "marker_labels": True, "shapes": True}
         self.shapes = []                  # dicts: index, type, color, width, label, parts [(n,2) world XY], holes
@@ -135,6 +139,9 @@ class OrthoView(QWidget):
         self.center = None                # world (X, Y)
         self.scale = 1.0                  # screen px per world unit
         self.zgrid = None                 # (array, x0, y1, px, nodata)
+        self._height_generation = 0
+        self._height_range = None
+        self.height_surface = None
         self.geographic = False
         self.unit = "m"
         self.offset = np.zeros(3)
@@ -170,6 +177,8 @@ class OrthoView(QWidget):
         self.pts = None; self.cams = []; self.markers = []; self.shapes = []
         self.selected_shape = None
         self.active_marker = None
+        self.marker_heights.clear()
+        self._hovered_flag = self._flag_pointer = None
         self._status_timer.stop()
         self.center = None; self.scale = 1.0
         self.coord_text = ""; self.last_world = None; self._drag = None
@@ -195,17 +204,18 @@ class OrthoView(QWidget):
         else:
             super().keyPressEvent(event)
 
-    def marker_at(self, x, y, tolerance=18):
-        if not self.vis.get("markers", True):
+    def marker_at(self, x, y):
+        if self.center is None or not self.vis.get("markers", True):
             return None
-        hits = []
-        for label, X, Y in self.markers:
-            sx, sy = self.to_screen(X, Y)
-            dx, dy = x - sx, y - sy
-            distance = dx * dx + dy * dy
-            if distance <= tolerance * tolerance or (-5 <= dx <= 18 and -27 <= dy <= 6):
-                hits.append((distance, label))
-        return min(hits)[1] if hits else None
+        return flag_at(x, y, ((label, *self.to_screen(X, Y)) for label, X, Y in self.markers))
+
+    def _update_flag_hover(self):
+        label = None
+        if self._flag_pointer is not None and not getattr(self, "survey_enabled", False):
+            label = self.marker_at(*self._flag_pointer)
+        if label != self._hovered_flag:
+            self._hovered_flag = label
+            self.update()
 
     def set_active_marker(self, label):
         self.active_marker = label
@@ -219,8 +229,11 @@ class OrthoView(QWidget):
         self._survey_anchor = None if point is None else np.asarray(point, float)
         self.update()
 
-    def set_markers(self, markers):
-        self.markers = list(markers or []); self.update()
+    def set_markers(self, markers, heights=None):
+        self.markers = list(markers or [])
+        self.marker_heights = dict(heights or {})
+        self._update_flag_hover()
+        self.update()
 
     def set_shapes(self, shapes, selected=None):
         """Imported shapes in world XY (same frame as the rasters / markers)."""
@@ -286,6 +299,8 @@ class OrthoView(QWidget):
     def set_visible(self, kind, on):
         changed = self.vis.get(kind) != bool(on)
         self.vis[kind] = bool(on)
+        if kind == "markers":
+            self._update_flag_hover()
         if kind in self.layers:
             self.layers[kind].visible = bool(on)
             if changed and kind in ('dem', 'dtm'):
@@ -294,19 +309,22 @@ class OrthoView(QWidget):
 
     def _load_height(self):
         """Z read-out source: the DEM if present, else the orthomosaic's height grid."""
-        src = None
-        if "dtm" in self.layers and self.layers['dtm'].visible:
-            src = self.layers['dtm'].info.get('path')
+        self._height_generation += 1
+        self.zgrid = self._height_range = self.height_surface = None
+        if "dtm" in self.layers and self.layers["dtm"].visible:
+            info = self.layers["dtm"].info
+            src = info.get("path")
         elif "dem" in self.layers:
-            src = self.layers["dem"].info.get("path")
-        elif "ortho" in self.layers:
-            src = self.layers["ortho"].info.get("height_path")
-        self.zgrid = None
+            info = self.layers["dem"].info
+            src = info.get("path")
+        else:
+            info = self.layers["ortho"].info if "ortho" in self.layers else {}
+            src = info.get("height_path")
         if not src:
             self.workChanged.emit("Loading elevation grid", 0, 0, False)
             return
         self.workChanged.emit("Loading elevation grid", 0, 0, True)
-        gen = self.gen
+        gen = self._height_generation
 
         def work():
             try:
@@ -317,7 +335,13 @@ class OrthoView(QWidget):
                     a = r.read_level(lev)[..., 0].astype(np.float32)
                     x0, y1, px, _ = r.geo
                     f = r.width / r.levels[lev].width
-                    res = (a, x0, y1, px * f, r.nodata)
+                    valid = np.isfinite(a)
+                    if r.nodata is not None:
+                        valid &= a != r.nodata
+                    low = float(np.min(a, where=valid, initial=np.inf))
+                    high = float(np.max(a, where=valid, initial=-np.inf))
+                    height_range = (low, high) if low <= high else None
+                    res = (a, x0, y1, px * f, r.nodata), height_range, info
             except Exception as e:  # noqa: BLE001
                 res = e
             try:
@@ -327,10 +351,11 @@ class OrthoView(QWidget):
         threading.Thread(target=work, name="ortho-height", daemon=True).start()
 
     def _height_ready(self, gen, res):
-        if gen == self.gen:
-            self.workChanged.emit("Loading elevation grid", 1, 1, False)
-        if gen == self.gen and not isinstance(res, Exception):
-            self.zgrid = res
+        if gen != self._height_generation:
+            return
+        self.workChanged.emit("Loading elevation grid", 1, 1, False)
+        if not isinstance(res, Exception):
+            self.zgrid, self._height_range, self.height_surface = res
             self._update_coords()
 
     def z_at(self, X, Y):
@@ -343,6 +368,58 @@ class OrthoView(QWidget):
             z = float(a[r, c])
             if np.isfinite(z) and (nd is None or z != nd):
                 return z
+        return None
+
+    def height_ray_hit(self, origin, direction):
+        """First downward height-grid intersection, without crossing a nodata gap."""
+        if self.zgrid is None or self._height_range is None or direction[2] >= -1e-6:
+            return None
+        grid, west, north, pixel, nodata = self.zgrid
+        low, high = self._height_range
+        start = max(0.0, (high + 0.01 - origin[2]) / direction[2])
+        stop = (low - 0.01 - origin[2]) / direction[2]
+        for axis, limits in enumerate(((west, west + pixel * grid.shape[1]),
+                                       (north - pixel * grid.shape[0], north))):
+            if abs(direction[axis]) < 1e-12:
+                if not limits[0] <= origin[axis] <= limits[1]:
+                    return None
+                continue
+            enter, exit_ = sorted((edge - origin[axis]) / direction[axis] for edge in limits)
+            start, stop = max(start, enter), min(stop, exit_)
+        if stop <= start:
+            return None
+
+        cells = (stop - start) * np.max(np.abs(direction[:2])) / pixel
+        steps = max(2, int(np.ceil(3 * cells)) + 1)
+        if steps > 16384:
+            return None
+        distances = np.linspace(start, stop, steps)
+        xyz = origin + distances[:, None] * direction
+        columns = np.floor((xyz[:, 0] - west) / pixel).astype(int)
+        rows = np.floor((north - xyz[:, 1]) / pixel).astype(int)
+        inside = (0 <= columns) & (columns < grid.shape[1]) & (0 <= rows) & (rows < grid.shape[0])
+        z = np.full(steps, np.nan)
+        z[inside] = grid[rows[inside], columns[inside]]
+        if nodata is not None:
+            z[z == nodata] = np.nan
+        delta = xyz[:, 2] - z
+        for i in np.flatnonzero((delta[:-1] >= 0) & (delta[1:] <= 0)):
+            a, b = distances[i:i + 2]
+            for _ in range(16):
+                mid = (a + b) * 0.5
+                point = origin + mid * direction
+                height = self.z_at(*point[:2])
+                if height is None:
+                    break
+                if point[2] > height:
+                    a = mid
+                else:
+                    b = mid
+            else:
+                point = origin + b * direction
+                height = self.z_at(*point[:2])
+                if height is not None and abs(point[2] - height) <= max(0.001, (b - a) * abs(direction[2])):
+                    return point
         return None
 
     # ------------------------------------------------------------------ transform
@@ -369,6 +446,7 @@ class OrthoView(QWidget):
         self.center = (float(b[0] + b[2]) / 2, float(b[1] + b[3]) / 2)
         w, h = max(b[2] - b[0], 1e-6), max(b[3] - b[1], 1e-6)
         self.scale = 0.92 * min(max(self.width(), 50) / w, max(self.height_px(), 50) / h)
+        self._update_flag_hover()
         self.update()
 
     reset_view = fit
@@ -523,10 +601,9 @@ class OrthoView(QWidget):
             for lab, X, Y in self.markers:
                 x, y = self.to_screen(X, Y)
                 if -20 < x < self.width() + 20 and -20 < y < self.height_px() + 20:
-                    from .marker_style import color
                     col = color(self.marker_states.get(lab, "predicted"))
-                    from .marker_style import draw_flag
-                    draw_flag(p, x, y, col, lab == self.active_marker)
+                    hovered = lab == self._hovered_flag and not getattr(self, "survey_enabled", False)
+                    draw_flag(p, x, y, HOVER_COLOR if hovered else col, lab == self.active_marker)
                     if self.vis.get("marker_labels", True):
                         rect = p.fontMetrics().boundingRect(str(lab)).adjusted(-4, -2, 4, 2)
                         rect.moveBottomLeft(QPointF(x + 18, y - 18).toPoint())
@@ -679,6 +756,8 @@ class OrthoView(QWidget):
             d = e.position() - p0
             self.center = (c0[0] - d.x() / self.scale, c0[1] + d.y() / self.scale)
             self.update()
+        self._flag_pointer = (e.position().x(), e.position().y())
+        self._update_flag_hover()
         self._update_coords(e.position())
 
     def mouseReleaseEvent(self, e):
@@ -723,27 +802,34 @@ class OrthoView(QWidget):
     def wheelEvent(self, e):
         d = e.angleDelta().y()
         if d:
+            self._flag_pointer = (e.position().x(), e.position().y())
             self.zoom(0.8 if d > 0 else 1.25, e.position())
             self._update_coords(e.position())
 
     def leaveEvent(self, e):
+        self._flag_pointer = None
+        self._update_flag_hover()
         self.coord_text = ""; self.update()
         self.coordinatesChanged.emit("")
 
     def contextMenuEvent(self, e):
         if getattr(self, 'survey_enabled', False):
             e.accept(); return
-        m = QMenu(self)
-        hit = self.marker_at(e.pos().x(), e.pos().y())
-        if hit:
-            m.addAction(f"Select GCP: {hit}").triggered.connect(
-                lambda: self.markerAction.emit("select", hit))
-            m.addSeparator()
-        X, Y, Z = self.coordinates_at(e.pos().x(), e.pos().y())
-        a = m.addAction("Copy Coordinates")
-        a.triggered.connect(lambda: self.copy_coordinates(X, Y, Z))
-        m.addAction("Reset View").triggered.connect(self.fit)
-        m.exec(e.globalPos())
+        self._flag_pointer = (e.pos().x(), e.pos().y())
+        self._update_flag_hover()
+        menu = QMenu(self)
+        label = self._hovered_flag
+        if label is None:
+            point = self.coordinates_at(*self._flag_pointer)
+            menu.addAction("Copy coordinate").triggered.connect(lambda: self.copy_coordinates(*point))
+        else:
+            _, x, y = next(marker for marker in self.markers if marker[0] == label)
+            z = self.marker_heights.get(label)
+            menu.addAction("Show GCP on table").triggered.connect(
+                lambda: self.markerAction.emit("select", label))
+            menu.addAction("Copy GCP coordinate").triggered.connect(lambda: self.copy_coordinates(x, y, z))
+        menu.addAction("Reset view").triggered.connect(self.fit)
+        menu.exec(e.globalPos())
 
     def copy_coordinates(self, X, Y, Z=None):
         txt = f"{X:.3f}\t{Y:.3f}" + (f"\t{Z:.3f}" if Z is not None else "")

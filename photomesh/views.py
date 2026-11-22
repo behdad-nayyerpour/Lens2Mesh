@@ -4,10 +4,10 @@ from __future__ import annotations
 import os
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QEvent, QPointF
+from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QRectF, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QColor, QWheelEvent, QPen, QVector3D
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QGraphicsView,
-                               QGraphicsScene)
+                               QGraphicsScene, QGraphicsItem, QApplication, QMenu)
 
 try:
     import pyqtgraph as pg
@@ -1039,7 +1039,6 @@ try:
             self.setFlag(_QGI.ItemIgnoresTransformations, True)
 
         def boundingRect(self):
-            from PySide6.QtCore import QRectF
             m = self.r * 1.4 + self.width + 6
             return QRectF(-m, -m, 2 * m, 2 * m)
 
@@ -1057,23 +1056,62 @@ class _ZoomView(QGraphicsView):
     def __init__(self):
         super().__init__()
         self.setScene(QGraphicsScene(self))
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self._pan_start = None
+        self._panning = False
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         from .theme import viewport_color
         self.setBackgroundBrush(viewport_color())
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pan_start = (event.position(), self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+            self._panning = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_start is not None and event.buttons() & Qt.LeftButton:
+            origin, horizontal, vertical = self._pan_start
+            delta = event.position() - origin
+            if self._panning or delta.manhattanLength() >= QApplication.startDragDistance():
+                self._panning = True
+                self.horizontalScrollBar().setValue(horizontal - round(delta.x()))
+                self.verticalScrollBar().setValue(vertical - round(delta.y()))
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pan_start = None
+            self._panning = False
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, e: QWheelEvent):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
         self.scale(f, f)
 
 
-class PhotoView(QWidget):
-    """Shows a single photo with pan/zoom and marker overlay.
+class _PhotoFlag(QGraphicsItem):
+    def __init__(self, state, active):
+        from .marker_style import color
+        super().__init__()
+        self.colour = color(state)
+        self.active = active
+        self.hovered = False
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setAcceptedMouseButtons(Qt.NoButton)
 
-    Right-click: place the active marker here / remove a marker near the
-    cursor. Pinned markers are green, used predictions blue, unused predictions grey."""
-    placeMarker = Signal(float, float)      # photo pixel coordinates
-    removeMarker = Signal(str)
+    def boundingRect(self):
+        return QRectF(-5, -27, 23, 33)
+
+    def paint(self, painter, option, widget=None):
+        from .marker_style import HOVER_COLOR, draw_flag
+        draw_flag(painter, 0, 0, HOVER_COLOR if self.hovered else self.colour, self.active)
+
+
+class PhotoView(QWidget):
+    """Single source photo with pixel navigation and editable GCP placements."""
+    modelCoordinatesRequested = Signal(float, float)
     addMarker = Signal(float, float)        # new marker pinned at this pixel
     markerAction = Signal(str, str)
     pinMarker = Signal(str, float, float)   # pin an existing marker here
@@ -1093,7 +1131,17 @@ class PhotoView(QWidget):
         self._survey_items = []
         self._survey_preview_item = None
         self.caption = QLabel("Select a photo in the Photos pane to open it.")
-        lay.addWidget(self.view, 1); lay.addWidget(self.caption)
+        self.coordinates = QLabel()
+        self.coordinates.setTextFormat(Qt.PlainText)
+        self._coordinate_timer = QTimer(self)
+        self._coordinate_timer.setSingleShot(True)
+        self._coordinate_timer.setInterval(60)
+        self._coordinate_timer.timeout.connect(self.refresh_coordinates)
+        self._cursor_pixel = None
+        self._model_coordinates = "—"
+        lay.addWidget(self.view, 1)
+        lay.addWidget(self.coordinates)
+        lay.addWidget(self.caption)
         self.path = None
         self.shapes = []           # projected shapes (see set_shapes)
         self._shape_items = []
@@ -1101,6 +1149,10 @@ class PhotoView(QWidget):
         self.markers = []          # (label, u, v, kind) kind: pinned | placed | predicted
         self.active_marker = None
         self.available_markers = []
+        self.ignored_here, self.ignored_all = set(), set()
+        self._flags = {}
+        self._hovered_flag = None
+        self._cursor_view_pos = None
         # Show Markers / Show Marker Labels, the same toggles as the Model and Ortho views
         self.vis = {"markers": True, "marker_labels": True}
         self._overlay = []
@@ -1111,13 +1163,21 @@ class PhotoView(QWidget):
         self.view.customContextMenuRequested.connect(self._context)
         self.view.viewport().installEventFilter(self)
         self.view.installEventFilter(self)
+        self.view.horizontalScrollBar().valueChanged.connect(self._update_photo_cursor)
+        self.view.verticalScrollBar().valueChanged.connect(self._update_photo_cursor)
+        self._format_coordinates()
 
     def apply_theme(self, light):
         from .theme import viewport_color
         self.view.setBackgroundBrush(viewport_color())
 
     def eventFilter(self, obj, ev):
-        """Ctrl+click: pin the active marker here (or add a new marker if none is active)."""
+        if obj is self.view.viewport():
+            if ev.type() in (QEvent.Leave, QEvent.Hide):
+                self._clear_photo_cursor()
+            elif ev.type() == QEvent.MouseMove and self.path is not None:
+                self._cursor_view_pos = ev.position()
+                self._update_photo_cursor()
         if getattr(self, 'survey_enabled', False) and obj is self.view.viewport() and self.path is not None:
             gesture = self._survey_gesture
             t = ev.type()
@@ -1154,17 +1214,60 @@ class PhotoView(QWidget):
             self.cancel_marker_move(); return True
         if (self._moving_marker and ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
                 and self.path is not None):
-            point = self.view.mapToScene(ev.position().toPoint())
-            label = self._moving_marker
-            self.cancel_marker_move()
-            self.pinMarker.emit(label, point.x(), point.y())
+            u, v = self._survey_scene_point((ev.position().x(), ev.position().y()))
+            if self._inside_photo(u, v):
+                label = self._moving_marker
+                self.cancel_marker_move()
+                self.pinMarker.emit(label, u, v)
             return True
         if (ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton
                 and ev.modifiers() & Qt.ControlModifier and self.path is not None):
-            p = self.view.mapToScene(ev.position().toPoint())
-            self.ctrl_click(p.x(), p.y())
+            u, v = self._survey_scene_point((ev.position().x(), ev.position().y()))
+            if self._inside_photo(u, v):
+                self.ctrl_click(u, v)
             return True
         return False
+
+    def _inside_photo(self, u, v):
+        bounds = self.view.sceneRect()
+        return 0 <= u < bounds.width() and 0 <= v < bounds.height()
+
+    def _clear_photo_cursor(self):
+        self._cursor_view_pos = self._cursor_pixel = None
+        self._coordinate_timer.stop()
+        self._set_hovered_flag(None)
+        self.set_model_coordinates(None)
+
+    def _update_photo_cursor(self):
+        pos = self._cursor_view_pos
+        if pos is None:
+            return
+        blocked = getattr(self, "survey_enabled", False) or self._moving_marker is not None
+        self._set_hovered_flag(None if blocked else self._flag_at(pos))
+        u, v = self._survey_scene_point((pos.x(), pos.y()))
+        if not self._inside_photo(u, v):
+            self._cursor_pixel = None
+            self._coordinate_timer.stop()
+            self.set_model_coordinates(None)
+            return
+        point = (u, v)
+        if point != self._cursor_pixel:
+            self._cursor_pixel = point
+            if not self._coordinate_timer.isActive():
+                self._coordinate_timer.start()
+
+    def _format_coordinates(self):
+        pixels = "—" if self._cursor_pixel is None else f"X: {self._cursor_pixel[0]:.2f} px  Y: {self._cursor_pixel[1]:.2f} px"
+        self.coordinates.setText(f"Model: {self._model_coordinates}\nPhoto: {pixels}")
+
+    def refresh_coordinates(self):
+        if self._cursor_pixel is not None:
+            self.modelCoordinatesRequested.emit(*self._cursor_pixel)
+            self._format_coordinates()
+
+    def set_model_coordinates(self, text):
+        self._model_coordinates = text or "—"
+        self._format_coordinates()
 
     def _survey_scene_point(self, point):
         inverse, valid = self.view.viewportTransform().inverted()
@@ -1182,7 +1285,6 @@ class PhotoView(QWidget):
         self._draw_survey()
 
     def _draw_survey(self):
-        from PySide6.QtWidgets import QGraphicsItem
         scene = self.view.scene()
         for item in self._survey_items:
             scene.removeItem(item)
@@ -1211,12 +1313,14 @@ class PhotoView(QWidget):
 
     def begin_marker_move(self, label):
         self._moving_marker = label
+        self._set_hovered_flag(None)
         self.view.viewport().setCursor(Qt.CrossCursor)
         self.view.setFocus()
 
     def cancel_marker_move(self):
         self._moving_marker = None
         self.view.viewport().unsetCursor()
+        self._update_photo_cursor()
 
     def ctrl_click(self, x, y):
         if getattr(self, 'survey_enabled', False):
@@ -1229,6 +1333,7 @@ class PhotoView(QWidget):
     def clear(self):
         """Drop the displayed photo and overlays when the project changes."""
         self.cancel_marker_move()
+        self._clear_photo_cursor()
         sc = self.view.scene()
         sc.clear(); sc.setSceneRect(0, 0, 0, 0)
         self._survey_items = []; self._survey_preview_item = None
@@ -1236,11 +1341,17 @@ class PhotoView(QWidget):
         self.view.resetTransform()
         self.path = None; self._pix = None
         self._overlay = []; self._shape_items = []
+        self._flags.clear()
         self.shapes = []; self.markers = []; self.active_marker = None
         self.available_markers = []
+        self.ignored_here.clear()
+        self.ignored_all.clear()
         self.caption.setText("Select a photo in the Photos pane to open it.")
 
     def open(self, path, caption=""):
+        self.cancel_marker_move()
+        self._clear_photo_cursor()
+        self._flags.clear()
         pm = QPixmap(path)
         sc = self.view.scene(); sc.clear(); self._overlay = []; self._shape_items = []; self._pix = None
         self._survey_items = []; self._survey_preview_item = None
@@ -1255,16 +1366,18 @@ class PhotoView(QWidget):
         self.path = path
         self.caption.setText(caption or path)
         self._draw_markers()
+        self._format_coordinates()
 
     def fit(self):
         if self._pix is not None:
             self.view.resetTransform()
             self.view.fitInView(self.view.sceneRect(), Qt.KeepAspectRatio)
 
-    def set_markers(self, markers, active=None, available=None):
+    def set_markers(self, markers, active=None, available=None, *, ignored_here=(), ignored_all=()):
         self.markers = list(markers or [])
         self.active_marker = active
         self.available_markers = list(available or [])
+        self.ignored_here, self.ignored_all = set(ignored_here), set(ignored_all)
         self._draw_markers()
 
     def set_visible(self, key, on):
@@ -1366,77 +1479,102 @@ class PhotoView(QWidget):
                 _label_item(str(lab), a, ls, c, 0.0)
 
     def _draw_markers(self):
-        from PySide6.QtWidgets import QGraphicsItem
-        from PySide6.QtCore import QRectF
-        from .marker_style import draw_flag, color
-        class FlagItem(QGraphicsItem):
-            def __init__(self, state, active):
-                super().__init__()
-                self.colour, self.active = color(state), active
-                self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-            def boundingRect(self):
-                return QRectF(-5, -27, 23, 33)
-            def paint(self, painter, option, widget=None):
-                draw_flag(painter, 0, 0, self.colour, self.active)
+        from .marker_style import color
+
         scene = self.view.scene()
         for item in self._overlay:
             scene.removeItem(item)
-        self._overlay = []
+        self._overlay.clear()
+        self._flags.clear()
+        self._hovered_flag = None
         if self.path is None or not self.vis.get("markers", True):
             return
         for label, u, v, state in self.markers:
-            item = FlagItem(state, label == self.active_marker)
-            item.setPos(u, v); item.setZValue(7); scene.addItem(item)
+            item = _PhotoFlag(state, label == self.active_marker)
+            item.setPos(u, v)
+            item.setZValue(7)
+            scene.addItem(item)
+            self._flags[label] = item
             self._overlay.append(item)
             if self.vis.get("marker_labels", True):
                 text = scene.addSimpleText(str(label))
-                font = text.font(); font.setBold(True); font.setPointSizeF(10); text.setFont(font)
+                font = text.font()
+                font.setBold(True)
+                font.setPointSizeF(10)
+                text.setFont(font)
                 text.setBrush(color(state))
                 text.setPen(QPen(QColor(0, 0, 0, 210), 0.5))
                 text.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-                text.setPos(u, v); text.setTransform(text.transform().translate(17, -27)); text.setZValue(8)
+                text.setAcceptedMouseButtons(Qt.NoButton)
+                text.setPos(u, v)
+                text.setTransform(text.transform().translate(17, -27))
+                text.setZValue(8)
                 self._overlay.append(text)
+        self._update_photo_cursor()
+
+    def _flag_at(self, pos):
+        from .marker_style import flag_at
+
+        transform = self.view.viewportTransform()
+        anchors = ((label, *transform.map(QPointF(u, v)).toTuple())
+                   for label, u, v, _ in self.markers if label in self._flags)
+        return flag_at(pos.x(), pos.y(), anchors)
+
+    def _set_hovered_flag(self, label):
+        if label == self._hovered_flag:
+            return
+        old = self._flags.get(self._hovered_flag)
+        if old is not None:
+            old.hovered = False
+            old.update()
+        self._hovered_flag = label
+        new = self._flags.get(label)
+        if new is not None:
+            new.hovered = True
+            new.update()
 
     def _context(self, pos):
-        from PySide6.QtWidgets import QMenu
-        if self.path is None or getattr(self, 'survey_enabled', False):
+        if self.path is None or getattr(self, "survey_enabled", False):
+            return
+        label = self._flag_at(pos)
+        if self._moving_marker is not None:
             return
         p = self.view.mapToScene(pos)
+        if label is None and not self._inside_photo(p.x(), p.y()):
+            return
+        self._set_hovered_flag(label)
         menu = QMenu(self)
-        a = menu.addAction("Add GCP")
-        a.setToolTip("New GCP pinned here, predicted on the other photos (Ctrl+click)")
-        a.triggered.connect(lambda: self.addMarker.emit(p.x(), p.y()))
-        if self.active_marker:
-            a = menu.addAction(f"Place GCP '{self.active_marker}' Here")
-            a.triggered.connect(lambda: self.placeMarker.emit(p.x(), p.y()))
-        if self.available_markers:
+        if label is None:
+            menu.addAction("Add GCP").triggered.connect(lambda: self.addMarker.emit(p.x(), p.y()))
             existing = menu.addMenu("Place Existing GCP")
-            for label in self.available_markers:
-                action = existing.addAction(str(label))
-                action.triggered.connect(
-                    lambda _checked=False, selected=label: self.pinMarker.emit(selected, p.x(), p.y()))
-        near = self.markers_near(p.x(), p.y())
-        if near:
-            menu.addSeparator()
-        from .marker_style import marker_menu
-        for m in near:
-            marker_menu(menu, m[0], lambda action, lab: self.markerAction.emit(action, lab))
-            if m[3] != "predicted":
-                a = menu.addAction(f"Remove GCP '{m[0]}' from this Photo")
-                a.triggered.connect(lambda _=False, lab=m[0]: self.removeMarker.emit(lab))
-        menu.exec(self.view.mapToGlobal(pos))
+            existing.setEnabled(bool(self.available_markers))
+            for point in self.available_markers:
+                existing.addAction(str(point)).triggered.connect(
+                    lambda _checked=False, point=point: self.pinMarker.emit(point, p.x(), p.y()))
+        else:
+            state = next(kind for name, _, _, kind in self.markers if name == label)
+            pin = menu.addAction("Pin GCP")
+            pin.setEnabled(state != "pinned")
+            pin.triggered.connect(lambda: self.markerAction.emit("pin", label))
+            menu.addAction("Move GCP").triggered.connect(lambda: self.markerAction.emit("move", label))
+            ignore = menu.addMenu("Ignore GCP")
+            local = ignore.addAction("only from this photo")
+            local.setEnabled(label not in self.ignored_here and label not in self.ignored_all)
+            local.triggered.connect(lambda: self.markerAction.emit("ignore_photo", label))
+            all_photos = ignore.addAction("From all photos")
+            all_photos.setEnabled(label not in self.ignored_all)
+            all_photos.triggered.connect(lambda: self.markerAction.emit("ignore", label))
+            menu.addAction("Delete GCP").triggered.connect(lambda: self.markerAction.emit("delete", label))
+            menu.addAction("Show GCP on table").triggered.connect(lambda: self.markerAction.emit("select", label))
+        menu.exec(self.view.viewport().mapToGlobal(pos))
 
-    def markers_near(self, x, y, px=40):
-        """Flags within `px` screen pixels of photo point (x, y), at any zoom
-        (none while Show Markers is off: hidden flags can't be picked)."""
-        if not self.vis.get("markers", True):
-            return []
-        transform = self.view.transform()
-        s = max(float(np.hypot(transform.m11(), transform.m12())), 1e-9)
-        return [m for m in self.markers if (m[1] - x) ** 2 + (m[2] - y) ** 2 < (px / s) ** 2]
+    def rotate(self, degrees):
+        self.view.rotate(degrees)
+        self._update_photo_cursor()
 
     def zoom(self, f):
         self.view.scale(f, f)
+        self._update_photo_cursor()
 
 
 from .orthoview import OrthoView  # noqa: E402,F401  (Ortho tab, see orthoview.py)

@@ -95,8 +95,13 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
     ch.markers=[original.to_dict()]
     window.refresh_all()
     view=window.ortho_view
-    monkeypatch.setattr(view,"marker_at",lambda *a:"G1")
-    monkeypatch.setattr(view,"coordinates_at",lambda *a:(110.,100.,0.))
+    from PySide6.QtWidgets import QTabBar
+    window.docks["Markers"].widget().findChild(QTabBar).setCurrentIndex(1)
+    assert window.markers_pane.isRowHidden(0)
+    view.center, view.scale = (110., 100.), 2.
+    view.set_markers([("G1", 110., 100.)], {"G1": 5.})
+    event_pos = QPoint(*map(round, view.to_screen(110., 100.)))
+    monkeypatch.setattr(view,"coordinates_at",lambda *a:(115.,105.,9.))
     before=copy.deepcopy(ch.markers); history=len(window._mk_undo)
     actions=[]
     class TestMenu:
@@ -106,10 +111,23 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
         def addSeparator(self): pass
         def exec(self,*args):
             actions.extend(a.text() for a in self.items)
-            next(a for a in self.items if a.text()=="Select GCP: G1").trigger()
+            self.items[0].trigger()
+            if len(self.items) == 3:
+                self.items[1].trigger()
     monkeypatch.setattr(orthoview,"QMenu",TestMenu)
-    view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse,QPoint(20,20),QPoint(20,20)))
-    assert actions == ["Select GCP: G1","Copy Coordinates","Reset View"]
+    view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, event_pos, event_pos))
+    assert actions == ["Show GCP on table", "Copy GCP coordinate", "Reset view"]
+    from PySide6.QtGui import QGuiApplication
+    assert QGuiApplication.clipboard().text() == "110.000\t100.000\t5.000"
+    assert not window.markers_pane.isRowHidden(0)
+    assert view._hovered_flag == "G1"
+    view.leaveEvent(None)
+    assert view._hovered_flag is None
+    actions.clear()
+    elsewhere = event_pos + QPoint(40, 40)
+    view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, elsewhere, elsewhere))
+    assert actions == ["Copy coordinate", "Reset view"]
+    assert QGuiApplication.clipboard().text() == "115.000\t105.000\t9.000"
     assert window.markers_pane.current_label() == "G1"
     assert ch.markers == before and len(window._mk_undo) == history
 

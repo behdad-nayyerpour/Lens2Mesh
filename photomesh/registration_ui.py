@@ -50,10 +50,11 @@ class RegistrationMixin:
                 QMessageBox.information(self,"Align Selected Photos",f"{camera.label}: ambiguous photo identity; repair aliases first."); return
             xyz,xy=[],[]
             for marker in ch.markers:
-                if marker.get("disabled") or not marker.get("enabled",True) or marker["label"] not in positions:
+                if (marker.get("disabled") or not marker.get("enabled",True)
+                        or marker["label"] not in positions or marker_key in marker.get("ignored_photos", ())):
                     continue
                 pins={name:projection for name,projection in marker.get("projections",{}).items()
-                      if len(projection)<3 or projection[2]}
+                      if g.projection_is_pinned(projection)}
                 try:
                     # The new photo has no model image ID yet; resolve its stable
                     # name through the same finite/deduplication/conflict policy.

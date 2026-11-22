@@ -102,7 +102,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self._viewData.connect(self._apply_view_data)
         self._texData.connect(self._apply_texture)
         self._viewProgress.connect(self._show_view_progress)
-        self.photo_view.markerAction.connect(lambda action, label: self.marker_view_action(action, label, "photo"))
+        self.photo_view.markerAction.connect(self.marker_view_action)
+        self.photo_view.modelCoordinatesRequested.connect(self._show_photo_model_coordinates)
+        self.ortho_view.heightReady.connect(lambda *_: self.photo_view.refresh_coordinates())
         self.ortho_view.markerAction.connect(lambda action, label: self.marker_view_action(action, label, "ortho"))
         self.model_view.surveyRay.connect(self._survey_pick_ray)
         self.model_view.surveyEditRays.connect(self._survey_edit_rays)
@@ -208,7 +210,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             "Project": self._dock("Project", self._workspace_panel(), L, "project"),
             "Markers": self._dock("Ground Control Point",
                                   markers_panel(self.markers_pane, self._safe("Import GCPs", self.import_markers),
-                                                self._safe("GCP coordinate system", self.change_gcp_coordinates)),
+                                                self._safe("GCP coordinate system", self.change_gcp_coordinates),
+                                                self.marker_prediction_count),
                                   L, "markers"),
             "Cameras": self._dock("Cameras", cameras_panel(self.reference), L, "cameras"),
             "Photos": self._dock("Photos", photos_panel, R, "photos"),
@@ -234,8 +237,6 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.reference.cameraActivated.connect(self._safe("Open Photo", self.open_photo))
         self.markers_pane.markerToggled.connect(self.toggle_marker)
         self.markers_pane.itemSelectionChanged.connect(self._marker_selection_changed)
-        self.photo_view.placeMarker.connect(self._safe("Place Marker", self.place_marker))
-        self.photo_view.removeMarker.connect(self.remove_marker_projection)
         self.photo_view.addMarker.connect(lambda u, v: self.add_marker_at_photo(u, v))
         self.photo_view.pinMarker.connect(lambda lab, u, v: self.pin_marker(lab, u, v))
         self.markers_pane.markerEdited.connect(self._marker_edited)
@@ -305,22 +306,14 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             self.show_view(self.ortho_view if self.ortho_view.has_raster() else self.model_view)
 
     def _goto_marker(self, label):
-        """Open the first photo where the marker is placed (pinned first)."""
-        ms = [m for m in (self.dataset.markers or []) if m["label"] == label]
-        if not ms:
-            return
-        for r in range(self.markers_pane.rowCount()):
-            if self.markers_pane.item(r, 0) and self.markers_pane.item(r, 0).data(Qt.UserRole) == label:
-                self.markers_pane.selectRow(r); break
-        proj = ms[0].get("projections") or {}
-        order = sorted(proj, key=lambda n: not (len(proj[n]) < 3 or proj[n][2]))
-        from .photonames import marker_camera_keys
-        stems = {key: index for index, key in marker_camera_keys(self.dataset).items()}
-        for n in order:
-            k = stems.get(os.path.splitext(n)[0].lower())
-            if k is not None:
-                self.open_photo(k); return
-        self.statusBar().showMessage(f"GCP {label} has no projections", 4000)
+        """Open the first photo with a placement, preferring manual pins."""
+        self._select_marker_row(label)
+        locations = next(self._gcp_photo_locations([label]), {})
+        priority = {"pinned": 0, "placed": 1, "predicted": 2, "ignored": 3}
+        if locations:
+            self.open_photo(min(locations, key=lambda index: priority[locations[index][2]]))
+        else:
+            self.statusBar().showMessage(f"GCP {label} has no projections", 4000)
 
     def _handlers(self):
         h = {
@@ -620,6 +613,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self._refresh_markers_pane()
         self._marker_selection_changed()
         self.photos.refresh(self.dataset)
+        if self._photo_filter:
+            self._update_gcp_photo_filter()
         self._update_title()
         self._update_stale_banners()
         self._update_menu_actions()
@@ -943,7 +938,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             labels = [l for l in labs.split("\x1f") if l]
             if labels == ["*"]:
                 labels = [m["label"] for m in self.dataset.markers or []]
-            self._marker_pane_action({"Remove GCP": "Remove GCPs"}.get(act, act), labels)
+            self._marker_pane_action({"Rename GCP...": "Rename GCP",
+                                      "Filter Photos by GCPs": "Open photos",
+                                      "Reset Filter": "All photos"}.get(act, act), labels)
             return
         elif action.startswith("set_camera:"):
             _t, k, on = action.split(":")
@@ -1012,7 +1009,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.photos._photo_identity = None
         self._marker_init()
         self._model_cache = (None,)
-        self._marker_xyz_cache = None
+        self._marker_xyz_cache = self._gcp_photo_context_cache = None
+        self._photo_coordinate_camera = None
         for raster in getattr(self, "_prepared_rasters", {}).values():
             raster.close()
         self._prepared_rasters = {}
@@ -1504,7 +1502,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             QMessageBox.information(self, "Rotate Photo", "Open a photo first.")
             return
         self.show_view(self.photo_view)
-        self.photo_view.view.rotate(deg)
+        self.photo_view.rotate(deg)
 
     # ------------------------------------------------------------ Workflow
     def add_photos(self, paths=None):
@@ -2575,7 +2573,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             positions = {label: X for label, X, _control in (self._marker_positions() or [])}
         except Exception:
             positions = {}
-        markers = []
+        markers, heights = [], {}
         offset = np.asarray((ch.georef or {}).get("offset") or [0, 0, 0], float)
         for marker in ch.markers or []:
             X = positions.get(marker["label"])
@@ -2588,8 +2586,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             else:
                 continue
             markers.append((marker["label"], float(point[0]), float(point[1])))
+            heights[marker["label"]] = float(point[2])
         self.ortho_view.marker_states = {m["label"]: marker_state(m) for m in ch.markers or []}
-        self.ortho_view.set_markers(markers)
+        self.ortho_view.set_markers(markers, heights)
 
     def show_ortho(self, kind):
         """Display > Ortho Product > Orthomosaic / DEM (and the Workspace rows): show the layer in the Ortho tab."""

@@ -272,6 +272,9 @@ def test_pixel_world_mapping_and_cursor_readout(qtbot, ortho_geo):
     assert Xs == pytest.approx(v.center[0] + 10 * 0.02) and Ys == pytest.approx(v.center[1] + 20 * 0.02)
     xl, yl = Xs - OFF[0], Ys - OFF[1]
     assert Zs == pytest.approx(float(ts.height(xl, yl)) + OFF[2], abs=0.1)
+    vertical_hit = v.height_ray_hit(np.array([Xs, Ys, Zs + 100.]), np.array([0., 0., -1.]))
+    assert vertical_hit == pytest.approx([Xs, Ys, Zs], abs=0.001)
+    assert v.height_ray_hit(np.array([Xs, Ys, Zs - 100.]), np.array([0., 0., -1.])) is None
     txt = format_coords(Xs, Ys, Zs)
     assert txt.startswith(f"X: {Xs:,.3f} m") and "Z:" in txt
     assert format_coords(51.5, 35.7, None, geographic=True).startswith("Lon: 51.50000000")

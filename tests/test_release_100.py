@@ -243,10 +243,12 @@ def test_ortho_context_hit_includes_flag_above_ground_point(window):
 
 def test_marker_hit_radius_remains_correct_after_photo_rotation(window, image_dir):
     photo = str(sorted(image_dir.iterdir())[0])
+    from PySide6.QtCore import QPointF
     window.photo_view.open(photo)
     window.photo_view.set_markers([("A", 10., 10., "pinned"), ("B", 500., 400., "placed")])
     window.photo_view.view.rotate(90)
-    assert [m[0] for m in window.photo_view.markers_near(10., 10.)] == ["A"]
+    view = window.photo_view
+    assert view._flag_at(view.view.mapFromScene(QPointF(10., 10.))) == "A"
 
 
 def test_thumbnail_batches_from_previous_project_are_ignored(window, monkeypatch):

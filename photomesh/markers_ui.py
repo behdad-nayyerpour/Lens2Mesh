@@ -73,15 +73,10 @@ def parse_accuracy(text):
 
 class MarkerEditMixin:
     def marker_view_action(self, action, label, view="photo"):
-        """Photo edits are undoable; model/raster actions can only select."""
-        if view != "photo":
-            if action == "select" and any(m["label"] == label for m in self.dataset.markers):
-                self._select_marker_row(label)
-                return True
-            return False
-        ms = self._marker_objs()
-        m = next((m for m in ms if m.label == label), None)
-        if m is None:
+        """Measurements are edited on photos; all views can reveal the table row."""
+        if action == "select":
+            return self._select_marker_row(label, reveal=True)
+        if view != "photo" or not any(m["label"] == label for m in self.dataset.markers):
             return False
         if action == "delete":
             return self.remove_markers([label])
@@ -91,23 +86,41 @@ class MarkerEditMixin:
             self.statusBar().showMessage(f"Move {label}: click its new position; Escape cancels")
             return True
         if action == "pin":
-            k = self.current_photo
-            if not (0 <= k < len(self.dataset.cameras)):
-                return False
             point = next((p for lab, *p in self.photo_view.markers if lab == label), None)
             return self.pin_marker(label, point[0], point[1]) if point else False
-        if action not in ("ignore", "use"):
+        if action == "ignore_photo":
+            stem = self._photo_marker_key(self.current_photo)
+            return self.ignore_markers([label], photo=stem) if stem is not None else False
+        if action == "ignore":
+            return self.ignore_markers([label])
+        return False
+
+    def ignore_markers(self, labels, *, photo=None):
+        """Discard placements in the requested scope and persist their exclusion."""
+        labels = set(labels)
+        points = self._marker_objs()
+        changed = [m for m in points if m.label in labels and not m.disabled
+                   and (photo is None or photo not in m.ignored_photos)]
+        if not changed:
             return False
         self._markers_snapshot()
-        m.disabled = action == "ignore"
-        self._commit_markers(ms, f"GCP {label}: {action}")
+        for marker in changed:
+            if photo is None:
+                marker.disabled = True
+                marker.projections.clear()
+                marker.ignored_photos.clear()
+            else:
+                marker.ignored_photos = sorted([*marker.ignored_photos, photo])
+                marker.discard_ignored_placements()
+        scope = "all photos" if photo is None else photo
+        self._commit_markers(points, f"Ignored {len(changed)} GCP(s) in {scope}")
         return True
 
     # ------------------------------------------------------------ state / undo
     def _marker_init(self):
         self._mk_undo, self._mk_redo = [], []
         self._ref_pending = {}            # label -> [x, y, z] being typed (incomplete reference)
-        self._photo_filter = None         # (labels, set of photo indices) or None
+        self._photo_filter = None         # active GCP labels, or None (all photos)
         for view in (self.photo_view, self.ortho_view, self.model_view):
             view.cancel_marker_move()
 
@@ -134,8 +147,6 @@ class MarkerEditMixin:
         self._ref_pending = pending
         self.set_modified()
         self._update_view_markers()
-        if self._photo_filter:
-            self.filter_photos_by_markers(self._photo_filter[0])
 
     def undo_markers(self):
         if not self._mk_undo:
@@ -195,17 +206,70 @@ class MarkerEditMixin:
 
     def photo_pixel_ray(self, k, u, v):
         """Ray (origin, unit direction) in the model frame through photo pixel (u, v)."""
+        camera = self._camera_of_photo(k)
+        return None if camera is None else self._pixel_ray(camera, u, v)
+
+    @staticmethod
+    def _pixel_ray(camera, u, v):
         from . import colmap_io as cio
-        r = self._camera_of_photo(k)
-        if r is None:
-            return None
-        model, iid, sx, sy = r
+        model, iid, sx, sy = camera
         im = model.images[iid]; cam = model.cameras[im.camera_id]
         x, y = cio.undistort_points(cam, np.array([[u / sx, v / sy]], float))
         R = im.R(); t = np.asarray(im.tvec, float)
         C = -R.T @ t
         d = R.T @ np.array([x[0], y[0], 1.0])
         return C, d / np.linalg.norm(d)
+
+    def _show_photo_model_coordinates(self, u, v):
+        """Resolve a calibrated photo pixel against current surface data only."""
+        from .orthoview import format_coords
+
+        ch, index = self.dataset, self.current_photo
+        photo = self.photo_view
+        if not (0 <= index < len(ch.cameras)) or not ch.cameras[index].aligned:
+            photo.set_model_coordinates(None)
+            return
+        key = (id(ch), index, getattr(self, "_model_cache", (None,))[0])
+        cached = getattr(self, "_photo_coordinate_camera", None)
+        if cached is None or cached[0] != key:
+            try:
+                camera = self._camera_of_photo(index)
+            except (OSError, ValueError):
+                camera = None
+            key = (id(ch), index, getattr(self, "_model_cache", (None,))[0])
+            cached = self._photo_coordinate_camera = (key, camera)
+        camera = cached[1]
+        point = None
+        if camera is not None:
+            origin, direction = self._pixel_ray(camera, u, v)
+            if np.isfinite(direction).all():
+                if ch.model_ply and not ch.meta.get("model", {}).get("stale"):
+                    scene = self._raycast_scene(build=False)
+                    if scene is None:
+                        self._start_occlusion_scene(for_photo_coordinates=True)
+                    else:
+                        point = self._mesh_ray_hit(scene, origin, direction)
+                surface = self.ortho_view.height_surface or {}
+                if (point is None and ch.georef and surface.get("georef") and not surface.get("stale")
+                        and not self.ortho_view.geographic):
+                    rotation = np.asarray(surface.get("rotation", np.eye(3)), float)
+                    offset = np.asarray(surface.get("offset", self._frame(ch).offset), float)
+                    if (rotation.shape == (3, 3) and offset.shape == (3,)
+                            and np.isfinite(rotation).all() and np.isfinite(offset).all()):
+                        world = self.ortho_view.height_ray_hit(rotation @ origin + offset, rotation @ direction)
+                        if world is not None:
+                            point = rotation.T @ (world - offset)
+        text = None
+        if point is not None:
+            text = format_coords(*self._frame(ch).to_world(point), unit="m" if ch.georef else "")
+        photo.set_model_coordinates(text)
+
+    @staticmethod
+    def _mesh_ray_hit(scene, origin, direction):
+        import open3d as o3d
+        ray = o3d.core.Tensor(np.r_[origin, direction][None].astype(np.float32))
+        distance = float(scene.cast_rays(ray, nthreads=1)["t_hit"].numpy()[0])
+        return origin + distance * direction if math.isfinite(distance) else None
 
     def _raycast_scene(self, build=True):
         """Open3D scene of the model mesh (shared with the shapes photo occlusion)."""
@@ -240,11 +304,9 @@ class MarkerEditMixin:
         o = np.asarray(o, float); d = np.asarray(d, float); d = d / np.linalg.norm(d)
         sc = self._raycast_scene()
         if sc is not None:
-            import open3d as o3d
-            ray = o3d.core.Tensor(np.r_[o, d][None].astype(np.float32))
-            t = float(sc.cast_rays(ray)["t_hit"].numpy()[0])
-            if math.isfinite(t):
-                return o + t * d, "model"
+            point = self._mesh_ray_hit(sc, o, d)
+            if point is not None:
+                return point, "model"
         md = getattr(self.model_view, "_mesh_data", None)
         if sc is None and md and md[0] is not None and len(md[1]) <= 3_000_000:
             t = ray_mesh(md[0], md[1], o, d)
@@ -423,18 +485,30 @@ class MarkerEditMixin:
             self._marker_error("Place GCP", "Photo identity is ambiguous; no observation was changed.")
             return False
         self._markers_snapshot()
+        if m.disabled:
+            m.projections.clear()
+            m.disabled = False
+        if stem in m.ignored_photos:
+            m.ignored_photos.remove(stem)
         m.projections = {a: b for a, b in m.projections.items() if g._stem(a) != stem}
         m.projections[stem] = [float(u), float(v), True]
         self._commit_markers(ms, f"GCP {label} pinned on {self.dataset.cameras[k].label} at ({u:.1f}, {v:.1f})")
         return True
 
-    def _select_marker_row(self, label):
-        p = self.markers_pane
-        for r in range(p.rowCount()):
-            if p.item(r, 0) and p.item(r, 0).data(Qt.UserRole) == label:
-                p.blockSignals(True); p.selectRow(r); p.blockSignals(False)
-                break
-        self._marker_selection_changed()
+    def _select_marker_row(self, label, *, reveal=False):
+        pane = self.markers_pane
+        for row in range(pane.rowCount()):
+            item = pane.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == label:
+                if pane.isRowHidden(row):
+                    pane.showAllPoints.emit()
+                pane.selectRow(row)
+                pane.scrollToItem(item)
+                if reveal:
+                    self._show_dock("Markers", True)
+                    pane.setFocus()
+                return True
+        return False
 
     # ------------------------------------------------------------ rename / remove
     def rename_marker(self, old, new=None):
@@ -459,6 +533,8 @@ class MarkerEditMixin:
                 m.label = new
         if old in self._ref_pending:
             self._ref_pending[new] = self._ref_pending.pop(old)
+        if self._photo_filter:
+            self._photo_filter = [new if label == old else label for label in self._photo_filter]
         gr = self.dataset.georef or {}
         for r in gr.get("rows") or []:
             if r.get("label") == old:
@@ -484,8 +560,6 @@ class MarkerEditMixin:
         for l in labels:
             self._ref_pending.pop(l, None)
         self._commit_markers(keep, f"Removed {n} GCP(s): {', '.join(labels[:10])}")
-        if self._photo_filter:
-            self.reset_photo_filter()
         return n
 
     def _marker_error(self, title, msg):
@@ -545,28 +619,31 @@ class MarkerEditMixin:
 
     # ------------------------------------------------------------ photos filter
     def marker_photo_indices(self, labels):
-        labs = set(labels)
-        stems = set()
-        for m in self.dataset.markers or []:
-            if m["label"] in labs:
-                stems |= {g._stem(p) for p in (m.get("projections") or {})}
-        from .photonames import marker_camera_keys
-        return {k for k, key in marker_camera_keys(self.dataset).items() if key in stems}
+        return {index for locations in self._gcp_photo_locations(labels) for index in locations}
 
     def filter_photos_by_markers(self, labels=None):
-        """Photos pane shows only the photos where the markers are placed (pinned or not)."""
+        """Show every photo with a visible placement or prediction for these points."""
         if labels is None:
             labels = self.markers_pane.selected_labels()
-        labels = [l for l in labels if l]
+        labels = [label for label in labels if label]
         if not labels:
-            self.statusBar().showMessage("Select one or more GCPs first", 4000); return set()
-        idx = self.marker_photo_indices(labels)
-        self._photo_filter = (labels, idx)
-        self.photos.set_filter(idx)
-        self.log(f"Photos filtered by GCPs {', '.join(labels[:10])}: {len(idx)} photos")
-        if "Photos" in getattr(self, "docks", {}):
+            self.statusBar().showMessage("Select one or more GCPs first", 4000)
+            return set()
+        self._photo_filter = labels
+        indices = self._update_gcp_photo_filter()
+        self.log(f"Photos filtered by GCPs {', '.join(labels[:10])}: {len(indices)} photos")
+        if "Photos" in self.docks:
             self.docks["Photos"].raise_()
-        return idx
+        return indices
+
+    def _update_gcp_photo_filter(self):
+        labels = set(self._photo_filter or ()) & {marker["label"] for marker in self.dataset.markers}
+        if not labels:
+            self.reset_photo_filter()
+            return set()
+        indices = self.marker_photo_indices(labels)
+        self.photos.set_filter(indices)
+        return indices
 
     def reset_photo_filter(self):
         self._photo_filter = None
@@ -583,19 +660,19 @@ class MarkerEditMixin:
             self._markers_snapshot()
             point.projections = retained
             self._commit_markers(points, f"GCP {label}: cleared {removed} automatic placements")
-            if self._photo_filter:
-                self.filter_photos_by_markers(self._photo_filter[0])
 
     def _marker_pane_action(self, action, labels):
         if action == "Add GCP":
             self.add_marker()
-        elif action == "Rename GCP..." and labels:
+        elif action == "Rename GCP" and labels:
             self.rename_marker(labels[0])
-        elif action == "Remove GCPs" and labels:
+        elif action == "Remove GCP" and labels:
             self.remove_markers(labels)
-        elif action == "Filter Photos by GCPs":
+        elif action == "Ignore GCP (in all photos)" and labels:
+            self.ignore_markers(labels)
+        elif action == "Open photos":
             self.filter_photos_by_markers(labels)
-        elif action == "Reset Filter":
+        elif action == "All photos":
             self.reset_photo_filter()
         elif action == "Clear auto placements" and len(labels) == 1:
             self.clear_auto_placements(labels[0])
