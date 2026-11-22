@@ -220,7 +220,7 @@ def processing_crs(georef):
     return f"EPSG:{(32700 if south else 32600)+int(number)}"
 
 
-def publish_outputs(pairs):
+def publish_outputs(pairs, *, activate=None):
     """Publish a prepared set of files/directories; roll back on any failure.
 
     Backups use unique sibling names and rename operations, so large clouds are
@@ -245,6 +245,8 @@ def publish_outputs(pairs):
         for source,destination,backup,exists in entries:
             replace_output(source,destination)
             published.append((source,destination))
+        if activate is not None:
+            activate()
     except BaseException:
         for source,destination in reversed(published):
             replace_output(destination,source)

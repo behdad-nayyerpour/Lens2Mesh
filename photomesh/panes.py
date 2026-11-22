@@ -6,11 +6,11 @@ import contextlib
 import io
 import os
 
-from PySide6.QtCore import Qt, Signal, QSize, QItemSelectionModel
-from PySide6.QtGui import QIcon, QPixmap, QColor, QBrush
+from PySide6.QtCore import Qt, Signal, QSize, QItemSelectionModel, QPointF
+from PySide6.QtGui import QIcon, QPixmap, QColor, QBrush, QPalette, QPainter, QPen
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QListWidget,
-    QListWidgetItem, QWidget, QVBoxLayout, QPlainTextEdit, QLineEdit, QMenu,
+    QListWidgetItem, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QPlainTextEdit, QLineEdit, QMenu,
     QHeaderView, QListView, QAbstractItemView)
 
 ROLE = Qt.UserRole
@@ -28,6 +28,19 @@ def summary_item(text="", tooltip=""):
     font = item.font(); font.setBold(True); item.setFont(font)
     item.setToolTip(tooltip)
     return item
+
+
+def error_summary_table(table, rows, headers):
+    summary = QTableWidget(rows, len(headers))
+    summary.setHorizontalHeaderLabels(headers)
+    summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    summary.verticalHeader().hide()
+    row_height = table.verticalHeader().defaultSectionSize()
+    summary.verticalHeader().setDefaultSectionSize(row_height)
+    summary.setFixedHeight(summary.horizontalHeader().sizeHint().height() + rows * row_height + 4)
+    summary.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    summary.setAlternatingRowColors(True)
+    return summary
 
 
 @contextlib.contextmanager
@@ -136,7 +149,7 @@ class WorkspacePane(QTreeWidget):
                 active = ci == project.active
                 parts = [f"{len(ch.cameras):,} images"]
                 if ch.markers:
-                    parts.append(f"{len(ch.markers):,} markers")
+                    parts.append(f"{len(ch.markers):,} GCPs")
                 if ch.tie_point_count:
                     parts.append(f"{ch.tie_point_count:,} tie points")
                 crs = (ch.georef or {}).get("crs") or ch.crs
@@ -169,7 +182,7 @@ class WorkspacePane(QTreeWidget):
                     par.addChild(ci_)
                 if ch.markers:
                     nctl = sum(1 for m in ch.markers if m.get("enabled", True))
-                    mk = self._item(it, f"Markers ({len(ch.markers):,})", ("markers", ci), "markers",
+                    mk = self._item(it, f"GCPs ({len(ch.markers):,})", ("markers", ci), "markers",
                                     layer=lay("markers"),
                                     tip=f"{nctl} control, {len(ch.markers) - nctl} check")
                     for m in ch.markers:
@@ -331,10 +344,10 @@ class WorkspacePane(QTreeWidget):
         if d and d[0] in ("tie", "cloud", "model", "tiled", "ortho", "dem", "shapes"):
             m.addSeparator(); m.addAction("Show")
         if d and d[0] in ("marker", "markers"):
-            m.addSeparator(); m.addAction("Add Marker")
+            m.addSeparator(); m.addAction("Add GCP")
             if d[0] == "marker":
-                m.addAction("Rename Marker..."); m.addAction("Remove Marker")
-            m.addAction("Filter Photos by Markers"); m.addAction("Reset Filter")
+                m.addAction("Rename GCP..."); m.addAction("Remove GCP")
+            m.addAction("Filter Photos by GCPs"); m.addAction("Reset Filter")
         if d and d[0] in ("shapes", "shape_layer", "shape"):
             m.addSeparator()
             m.addAction({"shapes": "Shape Settings...", "shape_layer": "Layer Style...",
@@ -359,11 +372,11 @@ class WorkspacePane(QTreeWidget):
                 self.contextAction.emit(f"shape_style:shape:{d[2]}", ci)
             elif a.text() == "Shape Settings...":
                 self.contextAction.emit("shape_style:all:", ci)
-            elif a.text() in ("Rename Marker...", "Remove Marker", "Filter Photos by Markers", "Reset Filter",
-                              "Add Marker"):
+            elif a.text() in ("Rename GCP...", "Remove GCP", "Filter Photos by GCPs", "Reset Filter",
+                              "Add GCP"):
                 labels = [r[2] for r in self.selected_roles() if r[0] == "marker"] or \
                     ([d[2]] if d[0] == "marker" else [])
-                if a.text() == "Filter Photos by Markers" and d[0] == "markers" and not labels:
+                if a.text() == "Filter Photos by GCPs" and d[0] == "markers" and not labels:
                     labels = ["*"]
                 self.contextAction.emit("marker:" + a.text() + ":" + "\x1f".join(labels), ci)
             else:
@@ -375,6 +388,7 @@ class ReferencePane(QTableWidget):
     COLS = ["Cameras", "X / Longitude", "Y / Latitude", "Z / Altitude", "Accuracy (m)",
             "Error (m)", "X estimated", "Y estimated", "Z estimated"]
     cameraActivated = Signal(int)
+    errorSummaryUpdated = Signal(object, int)
 
     def __init__(self, parent=None):
         super().__init__(0, len(self.COLS), parent)
@@ -383,6 +397,7 @@ class ReferencePane(QTableWidget):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(True)
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 7)
         self._filling = False
         self.cellClicked.connect(self._activate_camera)
 
@@ -406,7 +421,7 @@ class ReferencePane(QTableWidget):
             with bulk_fill(self):
                 self.clearContents()
                 self.data_row_count = len(dataset.cameras)
-                self.setRowCount(self.data_row_count + 1)
+                self.setRowCount(self.data_row_count)
                 geo = dataset.georef or {}
                 try:
                     crs = CRS.parse(geo.get("crs") or dataset.crs)
@@ -461,18 +476,52 @@ class ReferencePane(QTableWidget):
                         self.setItem(row, col, item)
                     if row in selected:
                         self.selectRow(row)
-                self.summary_row = self.data_row_count
-                rmse = math.sqrt(sum(x * x for x in errors) / len(errors)) if errors else None
-                self.error_summary = {"error": rmse, "measured": len(errors)}
-                tip = f"Camera RMSE from {len(errors)} GPS references with measured errors."
-                for column in range(self.columnCount()):
-                    self.setItem(self.summary_row, column, summary_item(tooltip=tip))
-                self.item(self.summary_row, 0).setText("Total Error")
-                self.item(self.summary_row, 5).setText(_fmt(rmse, 3) if rmse is not None else "—")
         finally:
             self._filling = False
             self.verticalScrollBar().setValue(scroll)
+        rmse = math.sqrt(sum(x * x for x in errors) / len(errors)) if errors else None
+        self.error_summary = {"error": rmse, "measured": len(errors)}
+        self.errorSummaryUpdated.emit(rmse, len(errors))
 
+
+def cameras_panel(table):
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(4, 4, 4, 16)
+    layout.setSpacing(5)
+    layout.addWidget(table, 1)
+    layout.addWidget(QLabel("Error summary (RMSE)"))
+    summary = table.summary_table = error_summary_table(table, 1, ["Group", "Error (m)"])
+    layout.addWidget(summary)
+
+    def update_summary(rmse, measured):
+        tip = f"Camera RMSE from {measured} GPS references with measured errors."
+        summary.setItem(0, 0, summary_item("Cameras", tip))
+        summary.setItem(0, 1, summary_item(_fmt(rmse, 3) or "—", tip))
+
+    table.errorSummaryUpdated.connect(update_summary)
+    update_summary(None, 0)
+    return panel
+
+
+def _gcp_status_dot(status):
+    rgb = {"Measured": "#087a48", "Pins ready": "#75d66d", "Review auto placements": "#428de6"}
+    icon = QIcon()
+    fill = QColor(rgb.get(status, "#929ba5"))
+    # Draw at native resolution for common Windows display scales.
+    for scale in (1., 1.25, 1.5, 1.75, 2., 2.5, 3., 4.):
+        size = round(16 * scale)
+        pixmap = QPixmap(size, size)
+        pixmap.setDevicePixelRatio(scale)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#c7d0db"), 1.0))
+        painter.setBrush(fill)
+        painter.drawEllipse(QPointF(8, 8), 6.5, 6.5)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 class MarkersPane(QTableWidget):
@@ -480,24 +529,36 @@ class MarkersPane(QTableWidget):
 
     Double-click a Markers / X / Y / Z / Accuracy cell to edit it (validated by
     the main window; Edit > Undo reverts). Double-click another cell opens the
-    marker's photo. Right-click: Add / Rename / Remove Marker, Filter Photos
-    by Markers, Reset Filter. The checkbox makes the marker a control (checked)
-    or check (unchecked) point."""
-    COLS = ["Markers", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
-            "Error (m)", "Projections", "Error (pix)"]
+    marker's photo. Right-click: Add / Rename / Remove GCP. The checkbox
+    makes the marker a control (checked) or check (unchecked) point."""
+    COLS = ["Point", "X/Easting", "Y/Northing", "Z/Altitude", "Accuracy (m)",
+            "Error (m)", "Pins", "Error (px)", "Role", "Status", "Auto"]
+    MIN_WIDTHS = (78, 92, 96, 88, 91, 72, 48, 78, 64, 116, 48)
     EDITABLE = (0, 1, 2, 3, 4)
     markerActivated = Signal(str)
     markerToggled = Signal(str, bool)
     markerEdited = Signal(str, int, str)        # label, column, new text
     markerAction = Signal(str, list)            # menu action, selected labels
+    presentationUpdated = Signal(object, int)
+    showAllPoints = Signal()
 
     def __init__(self, parent=None):
         super().__init__(0, len(self.COLS), parent)
         self.setHorizontalHeaderLabels(self.COLS)
         self.verticalHeader().setVisible(False)
+        self.setIconSize(QSize(16, 16))
+        self._status_icons = {status: _gcp_status_dot(status) for status in
+                              ("Measured", "Pins ready", "Review auto placements", "other")}
         self.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setAlternatingRowColors(True)
+        self.verticalHeader().setDefaultSectionSize(self.fontMetrics().height() + 7)
+        header = self.horizontalHeader()
+        header.moveSection(header.visualIndex(8), 1)
+        header.moveSection(header.visualIndex(6), header.visualIndex(7))
+        header.moveSection(header.visualIndex(10), header.visualIndex(6) + 1)
+        for column, width in enumerate(self.MIN_WIDTHS):
+            self.setColumnWidth(column, width)
         self._busy = False
         self.pending = {}
         self.itemChanged.connect(self._changed)
@@ -513,9 +574,12 @@ class MarkersPane(QTableWidget):
         self._busy = True
         try:
             with bulk_fill(self):
-                self._fill(dataset)
+                controls_with_pins = self._fill(dataset)
+            for column, width in enumerate(self.MIN_WIDTHS):
+                self.setColumnWidth(column, max(width, self.columnWidth(column) + 5))
         finally:
             self._busy = False
+        self.presentationUpdated.emit(dataset, controls_with_pins)
 
     def _fill(self, dataset):
         ms = getattr(dataset, "markers", None) or []
@@ -527,19 +591,42 @@ class MarkersPane(QTableWidget):
         selected = set(self.selected_labels())
         self.clearContents()
         self.data_row_count = len(ms)
-        self.setRowCount(len(ms) + 2)
+        self.setRowCount(len(ms))
         self._marker_groups = [bool(m.get("enabled", True)) for m in ms]
         self.error_summary = marker_error_summary(ms, rows)
+        from .georef import _stem, projection_is_measured, projection_is_refined, projection_is_pinned
+        aligned = {_stem(c.colmap_name or c.label) for c in dataset.cameras if c.aligned and c.enabled}
+        controls_with_pins = 0
+        dark = self.palette().color(QPalette.Base).lightness() < 128
         for r, m in enumerate(ms):
             pend = (self.pending or {}).get(m["label"])
-            ref = pend or m.get("ref") or [None, None, None]
+            estimate = m.get("photo_model_xyz") if pend is None and m.get("ref") is None else None
+            ref = pend or m.get("ref") or estimate or [None, None, None]
             acc = m.get("acc")
             e = rows.get(m["label"], {})
             proj = m.get("projections", {})
-            pinned = sum(1 for v in proj.values() if len(v) < 3 or v[2])
+            pins = {name for name, value in proj.items() if projection_is_pinned(value)}
+            pinned = len(pins)
+            automatic = sum(projection_is_refined(v) for v in proj.values())
+            manual_on_aligned = len({_stem(name) for name in pins} & aligned)
+            control = m.get("enabled", True)
+            if m.get("disabled"):
+                status = "Ignored"
+            elif m.get("ref") is None:
+                status = "Model estimate" if estimate is not None else "Needs XYZ"
+            elif automatic and e.get("pix") is None:
+                status = "Review auto placements"
+            elif manual_on_aligned < 2 and e.get("pix") is None:
+                status = "Needs aligned pins"
+            else:
+                status = "Measured" if e.get("pix") is not None else "Pins ready"
+            if control and not m.get("disabled") and m.get("ref") is not None:
+                observed = {_stem(name) for name, value in proj.items() if projection_is_measured(value)}
+                controls_with_pins += len(observed & aligned) >= 2
             vals = [m["label"], _fmt(ref[0], 4), _fmt(ref[1], 4), _fmt(ref[2], 4),
                     "" if not acc else (f"{acc[0]:.3f}" if acc[0] == acc[1] else f"{acc[0]:.3f}/{acc[1]:.3f}"),
-                    _fmt(e.get("total"), 4), f"{pinned}/{len(proj)}", _fmt(e.get("pix"), 3)]
+                    _fmt(e.get("total"), 4), str(pinned), _fmt(e.get("pix"), 3),
+                    "Control" if control else "Check", status, str(automatic)]
             for k, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(ROLE, m["label"])            # label before any edit
@@ -547,42 +634,34 @@ class MarkersPane(QTableWidget):
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 if k == 0:
                     it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                    it.setCheckState(Qt.Checked if m.get("enabled", True) else Qt.Unchecked)
-                    it.setToolTip(("Control point" if m.get("enabled", True) else "Check point") +
-                                  (" - ignored" if m.get("disabled", False) else "") +
-                                  "; checkbox changes Control/Check; double-click to rename")
-                    from .marker_style import flag_icon, marker_state
-                    it.setIcon(flag_icon(marker_state(m)))
-                    if m.get("disabled"):
-                        it.setForeground(QBrush(QColor(150, 150, 150)))
-                    it.setData(ROLE + 1, bool(m.get("enabled", True)))
+                    it.setCheckState(Qt.Checked if control else Qt.Unchecked)
+                    it.setToolTip("Double-click to rename")
+                    it.setIcon(self._status_icons.get(status, self._status_icons["other"]))
+                    it.setData(ROLE + 1, bool(control))
+                    it.setData(ROLE + 2, bool(m.get("disabled")))
+                elif k in (1, 2, 3) and estimate is not None:
+                    font = it.font()
+                    font.setItalic(True)
+                    it.setFont(font)
+                    it.setToolTip("Model coordinates at placement. Enter X, Y and Z in the control "
+                                  "coordinate system to add a surveyed reference.")
                 elif k in (1, 2, 3, 4):
                     it.setToolTip("Double-click to edit" + (" (incomplete: enter X, Y and Z)" if pend else ""))
                     if pend:
                         f = it.font(); f.setItalic(True); it.setFont(f)
-                        it.setForeground(QBrush(QColor(230, 160, 60)))
+                        it.setForeground(QBrush(QColor("#f0cf92" if dark else "#633e00")))
                 elif k == 6:
-                    it.setToolTip(f"{pinned} pinned / {len(proj)} locations. Gray predictions are display hints; "
-                                  "blue refined placements and green pins are image observations.")
+                    it.setToolTip(f"{pinned} manual pins")
+                elif k == 10:
+                    it.setToolTip("Automatic placements confirmed by image refinement. "
+                                  "Unconfirmed predictions are shown in the point details.")
                 self.setItem(r, k, it)
             if m["label"] in selected:
                 from PySide6.QtCore import QItemSelectionModel
                 self.selectionModel().select(self.model().index(r, 0),
                                              QItemSelectionModel.Select | QItemSelectionModel.Rows)
-        self.summary_rows = {}
-        for offset, group in enumerate(("Control points", "Check points")):
-            index = len(ms) + offset
-            self.summary_rows[group] = index
-            totals = self.error_summary[group]
-            tip = (f"RMSE: {totals['measured']} measured coordinate errors / {totals['count']} points. "
-                   "Pixel RMSE is weighted by observation count; ignored points are excluded.")
-            for column in range(self.columnCount()):
-                self.setItem(index, column, summary_item(tooltip=tip))
-            self.item(index, 0).setText(group)
-            self.item(index, 5).setText(_fmt(totals["error"], 3) if totals["error"] is not None else "—")
-            self.item(index, 7).setText(_fmt(totals["pixel"], 3) if totals["pixel"] is not None else "—")
-            self.setRowHidden(index, False)
         self.filter_group(getattr(self, "_group", 0))
+        return controls_with_pins
 
     def filter_group(self, group):
         if group != getattr(self, "_group", 0):
@@ -628,13 +707,13 @@ class MarkersPane(QTableWidget):
             self.selectRow(it.row())
         labels = self.selected_labels()
         m = QMenu(self)
-        m.addAction("Add Marker")
-        for name in ("Rename Marker...", "Remove Markers", "-", "Show Marker", "Filter Photos by Markers",
-                     "Reset Filter"):
-            if name == "-":
-                m.addSeparator(); continue
-            a = m.addAction(name)
-            a.setEnabled(bool(labels) or name == "Reset Filter")
+        m.addAction("Add GCP")
+        m.addAction("Rename GCP").setEnabled(len(labels) == 1)
+        m.addAction("Remove GCP").setEnabled(bool(labels))
+        can_ignore = any(not item.data(ROLE + 2) for item in self.selectedItems() if item.column() == 0)
+        m.addAction("Ignore GCP (in all photos)").setEnabled(can_ignore)
+        m.addAction("Open photos").setEnabled(bool(labels))
+        m.addAction("All photos")
         a = m.exec(self.viewport().mapToGlobal(pos))
         if a:
             self.markerAction.emit(a.text(), labels)
@@ -665,15 +744,93 @@ def marker_error_summary(markers, rows):
     return summary
 
 
-def markers_panel(table):
+def markers_panel(table, import_points, change_coordinates, prediction_count):
     from PySide6.QtWidgets import QTabBar
     panel = QWidget()
-    layout = QVBoxLayout(panel); layout.setContentsMargins(2, 2, 2, 2)
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(4, 4, 4, 16)
+    layout.setSpacing(5)
+    top = QHBoxLayout()
+    top.addStretch()
+    import_button = QPushButton("Import GCPs…")
+    import_button.clicked.connect(lambda: import_points())
+    add_button = QPushButton("Add GCP")
+    add_button.clicked.connect(lambda: table.markerAction.emit("Add GCP", []))
+    top.addWidget(import_button)
+    top.addWidget(add_button)
+    layout.addLayout(top)
+    coordinate_row = QHBoxLayout()
+    coordinate = QLabel("Not set")
+    coordinate.setWordWrap(True)
+    change = QPushButton("Change…")
+    change.clicked.connect(lambda: change_coordinates())
+    coordinate_row.addWidget(coordinate, 1)
+    coordinate_row.addWidget(change)
+    readiness = QLabel()
+    layout.addLayout(coordinate_row)
+    layout.addWidget(readiness)
     groups = QTabBar()
     for text in ("All points", "Control points", "Check points"):
         groups.addTab(text)
     groups.currentChanged.connect(table.filter_group)
+    table.showAllPoints.connect(lambda: groups.setCurrentIndex(0))
     layout.addWidget(groups); layout.addWidget(table, 1)
+
+    layout.addWidget(QLabel("Error summary (RMSE)"))
+    summary = table.summary_table = error_summary_table(table, 2, ["Point group", "Error (m)", "Error (px)"])
+    layout.addWidget(summary)
+
+    details = QLabel()
+    details.setWordWrap(True)
+    layout.addWidget(details)
+    actions = QHBoxLayout()
+    open_photos = QPushButton("Open photos")
+    open_photos.clicked.connect(lambda: table.markerAction.emit("Open photos", table.selected_labels()))
+    all_photos = QPushButton("All photos")
+    all_photos.clicked.connect(lambda: table.markerAction.emit("All photos", []))
+    clear_auto = QPushButton("Clear auto placements")
+    clear_auto.setToolTip("Clear refined automatic placements for the selected GCP. Manual pins and predictions are retained.")
+    clear_auto.clicked.connect(lambda: table.markerAction.emit("Clear auto placements", table.selected_labels()))
+    actions.addWidget(open_photos)
+    actions.addWidget(all_photos)
+    actions.addWidget(clear_auto)
+    layout.addLayout(actions)
+
+    def update_details():
+        rows = table.selectionModel().selectedRows(0)
+        clear_auto.setEnabled(False)
+        if len(rows) != 1:
+            details.setText("Select a point to see its placements.")
+        else:
+            row = rows[0].row()
+            pins = table.item(row, 6)
+            auto = table.item(row, 10)
+            label = pins.data(ROLE)
+            details.setText(f"{label} · Manual pins: {pins.text()} · "
+                            f"Auto placements: {auto.text()} · Predictions: {prediction_count(label)}")
+            clear_auto.setEnabled(int(auto.text()) > 0)
+        open_photos.setEnabled(bool(rows))
+
+    def update_panel(dataset, ready_count):
+        from .alignment_reference import gcp_crs
+        from .georef import CRS
+        reference = gcp_crs(dataset)
+        try:
+            reference = CRS.parse(reference).name
+        except ValueError:
+            pass
+        coordinate.setText(reference)
+        readiness.setText(f"Controls with enough placements: {ready_count}")
+        for index, group in enumerate(("Control points", "Check points")):
+            totals = table.error_summary[group]
+            summary.setItem(index, 0, summary_item(group))
+            for column, key in enumerate(("error", "pixel"), 1):
+                summary.setItem(index, column, summary_item(_fmt(totals[key], 3) or "—"))
+        update_details()
+
+    table.itemSelectionChanged.connect(update_details)
+    table.presentationUpdated.connect(update_panel)
+    update_details()
     return panel
 
 
@@ -736,7 +893,7 @@ class PhotosPane(QListWidget):
     filter = None                      # set of photo indices shown, or None (all)
 
     def set_filter(self, indices):
-        """Filter Photos by Markers: show only these photo indices (None = all)."""
+        """Filter Photos by GCPs: show only these photo indices (None = all)."""
         self.filter = None if indices is None else set(indices)
         for r in range(self.count()):
             it = self.item(r)

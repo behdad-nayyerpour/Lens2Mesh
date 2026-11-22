@@ -94,6 +94,21 @@ def test_model_num_images(tmp_path):
     assert fp.model_num_images(str(tmp_path / "missing")) == 0
 
 
+def test_primary_reconstruction_prefers_the_largest_valid_component(tmp_path):
+    import struct
+    from photomesh import colmap_io as cio
+    from test_dense_mesh_gcp import synthetic_model
+
+    cio.write_model(tmp_path / "0", synthetic_model(n_img=3, n_pts=100))
+    cio.write_model(tmp_path / "1", synthetic_model(n_img=5, n_pts=100))
+    (tmp_path / "2").mkdir()
+    (tmp_path / "2/images.bin").write_bytes(struct.pack("<Q", 20))
+    assert "5 registered photos" in fp._select_primary_model(tmp_path)[0][1]
+    assert len(cio.read_model(tmp_path / "0").images) == 5
+    former, = tmp_path.glob("alternate-primary-*")
+    assert len(cio.read_model(former).images) == 3
+
+
 # ------------------------------------------------- coarse-to-fine refinement
 def _fast_wd(tmp_path, monkeypatch, n=5, registered=3):
     monkeypatch.setattr(cm, "colmap_options", lambda exe, c: set())
@@ -329,6 +344,30 @@ def test_rescale_keypoints_and_camera_to_original(tmp_path):
     con = sqlite3.connect(db)
     assert con.execute("SELECT width FROM cameras").fetchone()[0] == 5280
     con.close()
+
+
+def test_fisheye_resize_preserves_distortion_and_round_trips_intrinsics(tmp_path):
+    import numpy as np
+    from photomesh.colmap_io import MODEL_ID
+
+    db = str(tmp_path / "fisheye.db")
+    _feature_db(db, 1000, 800, 500.0, [[100, 200, 1, 0, 0, 1]])
+    original = np.array([500.0, 600.0, 490.0, 395.0, 0.01, -0.02, 0.003, -0.0004])
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE cameras SET model=?, params=?", (MODEL_ID["OPENCV_FISHEYE"], original.tobytes()))
+    dims = {"a.jpg": {"orig": (2000, 1800), "work": (1000, 800)}}
+    fp.rescale_db_to_original(db, dims, "work")
+    with sqlite3.connect(db) as con:
+        w, h, params = con.execute("SELECT width, height, params FROM cameras").fetchone()
+        keypoints = np.frombuffer(con.execute("SELECT data FROM keypoints").fetchone()[0], np.float32)
+    assert (w, h) == (2000, 1800)
+    np.testing.assert_allclose(np.frombuffer(params), original * [2, 2.25, 2, 2.25, 1, 1, 1, 1])
+    np.testing.assert_allclose(keypoints[:2], [200.0, 450.0])
+    fp.set_cameras_to_work_size(db, dims, "work")
+    with sqlite3.connect(db) as con:
+        w, h, params = con.execute("SELECT width, height, params FROM cameras").fetchone()
+    assert (w, h) == (1000, 800)
+    np.testing.assert_allclose(np.frombuffer(params), original)
 
 
 def test_fast_steps_use_cache_and_feature_cap(tmp_path, monkeypatch):

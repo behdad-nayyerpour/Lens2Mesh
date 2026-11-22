@@ -99,12 +99,12 @@ def test_fast_steps_structure(tmp_path, monkeypatch):
 
 
 def test_exhaustive_mode_steps(tmp_path, monkeypatch):
+    from photomesh.project import Camera, ProjectData
+
     monkeypatch.setattr(cm, "colmap_options", lambda exe, c: set())
-    monkeypatch.setattr(cm, "image_max_dim", lambda p: 2000)
-    class C:  # minimal dataset
-        cameras = []
-    steps = cm.align_steps("colmap", C, str(tmp_path), {"mode": "Exhaustive", "accuracy": "Medium",
-                                                     "key_point_limit": 0, "use_gpu": False})
+    dataset = ProjectData(cameras=[Camera("a.jpg", width=2000, height=1500)])
+    steps = cm.align_steps("colmap", dataset, str(tmp_path), {"mode": "Exhaustive", "accuracy": "Medium",
+                                                          "key_point_limit": 0, "use_gpu": False})
     assert steps[1][1][0] == "exhaustive_matcher"
     fe = steps[0][1]
     assert fe[fe.index("--SiftExtraction.max_image_size") + 1] == "1000"

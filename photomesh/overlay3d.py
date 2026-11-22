@@ -117,6 +117,7 @@ class Overlay:
 
     def __init__(self):
         self.marker_states = {}
+        self.selected_markers = frozenset()
         self.markers = None        # (pts (n,3) display frame, labels, control bool (n,))
         self.cameras = None        # (pts (n,3), labels)
         self.shape_labels = []     # [(pts (n,3), labels, QColor[, style])]; style: label_size, label_bg, label_bg_color
@@ -178,9 +179,16 @@ class Overlay:
                 add("shape", pts, labels, col, False, ent[3] if len(ent) > 3 else None)
         if self.markers is not None and self.show.get("markers"):
             pts, labels, ctl = self.markers
-            from .marker_style import color
-            cols = [color(self.marker_states[str(lab)]) if str(lab) in self.marker_states else
-                    (CONTROL if c else CHECK) for lab, c in zip(labels or [""] * len(pts), ctl)]
+            from .marker_style import HOVER_COLOR, color
+            cols = []
+            for label, control in zip(labels or [""] * len(pts), ctl):
+                name = str(label)
+                if name in self.selected_markers:
+                    cols.append(HOVER_COLOR)
+                elif name in self.marker_states:
+                    cols.append(color(self.marker_states[name]))
+                else:
+                    cols.append(CONTROL if control else CHECK)
             add("marker", pts, labels if self.show.get("marker_labels") else None, cols, True)
         return out
 

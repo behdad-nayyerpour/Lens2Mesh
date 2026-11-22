@@ -90,6 +90,22 @@ def test_sparse_direct_solution_preserves_dense_normal_equations(monkeypatch):
     np.testing.assert_allclose(matrix @ actual, rhs, atol=1e-12)
 
 
+def test_matrix_free_schur_preserves_the_damped_solution():
+    from photomesh.survey_capacity import solve_camera_schur
+
+    rng = np.random.default_rng(55)
+    coupling = sparse.random(220, 90, density=.08, random_state=rng, format="csr")
+    inverse_points = sparse.diags(rng.uniform(.01, .1, size=90))
+    camera = sparse.diags(rng.uniform(40., 80., size=220))
+    scaled = coupling @ inverse_points
+    explicit = camera - scaled @ coupling.T
+    rhs = rng.normal(size=220)
+    actual = solve_camera_schur(camera, scaled, coupling.T.tocsr(), rhs)
+    expected = solve_camera_system(explicit, rhs)
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-8)
+    assert np.linalg.norm(explicit @ actual - rhs) < 1e-6
+
+
 def test_sparse_bundle_matches_dense_reference_poses_calibration_and_points(monkeypatch):
     from test_dense_mesh_gcp import synthetic_model
     from photomesh import georef, survey_capacity, colmap_io

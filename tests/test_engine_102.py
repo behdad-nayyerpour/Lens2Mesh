@@ -93,15 +93,23 @@ def test_neural_feature_and_matcher_types_are_consistent(monkeypatch):
     from photomesh import colmap
     options={"FeatureExtraction.type","FeatureExtraction.use_gpu","FeatureMatching.type",
              "FeatureMatching.use_gpu","AlikedExtraction.n16rot_model_path",
-             "AlikedExtraction.max_num_features","AlikedMatching.lightglue_model_path"}
+             "AlikedExtraction.max_num_features","AlikedMatching.lightglue_model_path",
+             "SiftMatching.lightglue_model_path", "FeatureMatching.guided_matching"}
     monkeypatch.setattr(colmap,"colmap_options",lambda *_:options)
     monkeypatch.setattr(engine,"gpu_device",lambda *_:None)
     monkeypatch.setattr(engine,"verified_model",lambda exe,name:"/offline/"+name)
-    cfg={"feature_method":"ALIKED + LightGlue","key_point_limit":2048,"use_gpu":False}
+    cfg={"feature_method":"ALIKED + LightGlue","key_point_limit":2048,"use_gpu":False,
+         "guided_matching":True}
     extract=engine.matching_arguments("engine","feature_extractor",cfg,True)
     match=engine.matching_arguments("engine","matches_importer",cfg)
     assert "ALIKED_N16ROT" in extract and "ALIKED_LIGHTGLUE" in match
     assert not any("http" in value for value in extract+match)
+    for command in ("matches_importer", "exhaustive_matcher", "sequential_matcher"):
+        for method in ("ALIKED + LightGlue", "SIFT + LightGlue"):
+            args = engine.matching_arguments("engine", command, dict(cfg, feature_method=method))
+            assert "--FeatureMatching.guided_matching" not in args
+        args = engine.matching_arguments("engine", command, dict(cfg, feature_method="SIFT"))
+        assert args[args.index("--FeatureMatching.guided_matching") + 1] == "1"
 
 
 def test_neural_rejects_implicit_or_unbounded_feature_count(monkeypatch):

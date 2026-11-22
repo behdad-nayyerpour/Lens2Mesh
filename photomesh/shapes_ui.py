@@ -58,6 +58,8 @@ class ShapesMixin:
         """The dataset's shapes (loaded from its shapes.json, cached by file time)."""
         ch = ch or self.dataset
         info = ch.shapes or {}
+        if info.get("stale_frame"):
+            return None
         p = info.get("path")
         if not p or not os.path.exists(p):
             return None
@@ -79,6 +81,9 @@ class ShapesMixin:
 
     def _store_shapes(self, ch, sset):
         path = (ch.shapes or {}).get("path") or self._shapes_file(ch)
+        if (ch.shapes or {}).get("stale_frame"):
+            import uuid
+            path = os.path.join(os.path.dirname(self._shapes_file(ch)), f"project-{uuid.uuid4().hex[:12]}.json")
         S.save(sset, path)
         old = dict(ch.shapes or {})
         srcs = list(dict.fromkeys([L.get("source") for L in sset["layers"] if L.get("source")]))
@@ -275,7 +280,8 @@ class ShapesMixin:
         sset = self._shape_set(ch)
         if not sset or not sset["shapes"]:
             if options is None:
-                QMessageBox.information(self, "Export Shapes", "No shapes - use File > Import > Import Shapes...")
+                message = (ch.shapes or {}).get("stale_frame") or "No shapes - use File > Import > Import Shapes..."
+                QMessageBox.information(self, "Export Shapes", message)
             return None
         frame = self._frame(ch)
         systems = [("Project coordinate system (" + frame.describe() + ")", S.SrcCRS("project"))]
@@ -833,10 +839,12 @@ class ShapesMixin:
         p = ch.model_ply
         return (p, os.path.getmtime(p)) if p and os.path.exists(p) else None
 
-    def _start_occlusion_scene(self):
+    def _start_occlusion_scene(self, *, for_photo_coordinates=False):
         ch = self.dataset
         key = self._occl_key(ch)
-        if key is None or not ch.shapes or self._occl["key"] == key or self._occl["busy"]:
+        if (key is None or (not ch.shapes and not for_photo_coordinates)
+                or key == self._occl["key"] or self._occl["busy"]
+                or (for_photo_coordinates and key == self._occl.get("failed"))):
             return
         self._occl["busy"] = True
         self.busy_indicator.background("model-occlusion", "Preparing model visibility")
@@ -849,6 +857,8 @@ class ShapesMixin:
                 V, F = read_mesh(key[0])
                 sc = o3d.t.geometry.RaycastingScene()
                 sc.add_triangles(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32)))
+                # Build the ray acceleration structure before publishing it to the cursor.
+                sc.cast_rays(o3d.core.Tensor([[0., 0., 0., 1., 0., 0.]], dtype=o3d.core.Dtype.Float32))
                 res = (key, sc)
             except Exception as e:  # noqa: BLE001
                 res = (key, e)
@@ -862,9 +872,14 @@ class ShapesMixin:
         self._occl["busy"] = False
         self.busy_indicator.background("model-occlusion")
         key, sc = res
+        if key != self._occl_key(self.dataset):
+            return
         if isinstance(sc, Exception):
-            self.log(f"Shapes: no occlusion test on photos ({sc})"); return
-        self._occl.update(key=key, scene=sc)
+            self._occl["failed"] = key
+            self.log(f"Photo views: mesh ray casting unavailable ({sc})")
+            return
+        self._occl.update(key=key, scene=sc, failed=None)
+        self.photo_view.refresh_coordinates()
         self._photo_shape_cache.clear()
         try:
             self._update_photo_shapes()

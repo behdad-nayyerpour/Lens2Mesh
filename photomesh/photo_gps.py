@@ -32,9 +32,11 @@ def camera_gps(dataset, names=None):
     return result
 
 
-def camera_accuracies(dataset, names=None):
+def camera_accuracies(dataset, names=None, *, reported=None):
     """Explicit opt-in reported E/N/up sigmas; never infer accuracy from RTK flag alone."""
-    if not use_photo_gps(dataset) or not dataset.reference_settings.get('reported_gps_accuracy', False):
+    if reported is None:
+        reported = dataset.reference_settings.get('reported_gps_accuracy', False)
+    if not use_photo_gps(dataset) or not reported:
         return {}
     if names is None:
         from .photonames import photo_map

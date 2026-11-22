@@ -42,9 +42,11 @@ def cmd_filter_cloud(cfg):
     from . import pcfilter as pf
     from .dense import read_vis_counts
     t0 = time.perf_counter()
+    _log("Progress stage: Reading fused point cloud")
     cloud = pf.read_cloud(cfg["input"])
     _log(f"Read {len(cloud['xyz']):,} fused points ({time.perf_counter() - t0:.1f} s)")
     if os.path.exists(cfg.get("vis", "")):
+        _log("Progress stage: Reading point visibility")
         t1 = time.perf_counter()
         conf = read_vis_counts(cfg["vis"])
         if len(conf) == len(cloud["xyz"]):
@@ -56,12 +58,15 @@ def cmd_filter_cloud(cfg):
         C, D = _cameras(cfg["model"])
     up = cfg.get("up")
     input_count=len(cloud["xyz"])
+    _log("Progress stage: Filtering point cloud")
     cloud, stats = pf.filter_cloud(cloud, cfg, C, D, up, log=_log)
     if not len(cloud["xyz"]):
         raise ValueError("Filtering removed every point; previous cloud was kept. Relax the filters.")
     temporary = cfg["output"] + ".building.ply"
     try:
+        _log("Progress stage: Writing filtered point cloud")
         pf.write_cloud(temporary, cloud["xyz"], cloud.get("rgb"), cloud.get("normals"), cloud.get("confidence"))
+        _log("Progress stage: Validating filtered point cloud")
         from .dense import ply_vertex_count
         if not ply_vertex_count(temporary):
             raise ValueError("Incomplete point cloud output")
@@ -101,6 +106,9 @@ def cmd_refine_markers(cfg):
     markers = [g.Marker(**m) for m in cfg["markers"]]
     plan, Xs = {}, {}
     for m in markers:
+        if m.disabled:
+            continue
+        ignored = set(m.ignored_photos)
         X = None
         pos = (cfg.get("positions") or {}).get(m.label)
         if pos is not None:
@@ -112,13 +120,15 @@ def cmd_refine_markers(cfg):
         if X is None:
             continue
         Xs[m.label] = X
-        for iid in model.images:
+        for iid, image in model.images.items():
+            if g._stem(image.name) in ignored:
+                continue
             p = g.predict_projection(model, iid, X)
             cam = model.cameras[model.images[iid].camera_id]
             if p is None or not (40 <= p[0] < cam.width - 40 and 40 <= p[1] < cam.height - 40):
                 continue
             plan.setdefault(iid, []).append(((m.label, iid), p))
-    _log(f"{len(Xs)} markers predicted in {sum(len(v) for v in plan.values())} photo locations")
+    _log(f"{len(Xs)} GCPs predicted in {sum(len(v) for v in plan.values())} photo locations")
     views = mr.crop_views(model, cfg["image_root"], plan, radius=200)
     _log(f"Read {len(views)} photo crops ({time.perf_counter() - t0:.1f} s)")
     out = {}
@@ -127,7 +137,7 @@ def cmd_refine_markers(cfg):
             continue
         ids = [iid for iid in model.images if (m.label, iid) in views]
         pins = {names[g._stem(p)]: (v[0], v[1]) for p, v in m.projections.items()
-                if g._stem(p) in names and (len(v) < 3 or v[2])}
+                if g._stem(p) in names and g.projection_is_pinned(v)}
         res = mr.auto_place(model, cfg["image_root"], Xs[m.label], [i for i in ids if i not in pins],
                             pinned=pins or None, method="auto", search=int(cfg.get("search", 25)),
                             views=lambda i, lab=m.label: views.get((lab, i)))
@@ -136,7 +146,7 @@ def cmd_refine_markers(cfg):
     with open(cfg["output"], "w", encoding="utf-8") as f:
         json.dump(out, f)
     n = sum(len(v) for v in out.values())
-    _log(f"Placed {n} marker projections in {time.perf_counter() - t0:.1f} s")
+    _log(f"Placed {n} GCP projections in {time.perf_counter() - t0:.1f} s")
 
 
 def _result(cfg, info):

@@ -23,7 +23,7 @@ from .dialogs import (AlignPhotosDialog, BuildPointCloudDialog, BuildModelDialog
                       BuildDEMDialog, BuildOrthomosaicDialog, ExportRasterDialog)
 from .menus import MENUS, ACTION_LABELS, LEGACY_ACTION_GROUPS
 from .panes import (WorkspacePane, ReferencePane, MarkersPane, PhotosPane, ConsolePane,
-                    PropertiesPane, JobsPane, markers_panel)
+                    PropertiesPane, JobsPane, cameras_panel, markers_panel)
 from . import procmeta
 from .plyio import load_ply, ply_counts, vertex_normals
 from .project import Project, ProjectData, IMAGE_EXTS, data_folder
@@ -102,7 +102,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self._viewData.connect(self._apply_view_data)
         self._texData.connect(self._apply_texture)
         self._viewProgress.connect(self._show_view_progress)
-        self.photo_view.markerAction.connect(lambda action, label: self.marker_view_action(action, label, "photo"))
+        self.photo_view.markerAction.connect(self.marker_view_action)
+        self.photo_view.modelCoordinatesRequested.connect(self._show_photo_model_coordinates)
+        self.ortho_view.heightReady.connect(lambda *_: self.photo_view.refresh_coordinates())
         self.ortho_view.markerAction.connect(lambda action, label: self.marker_view_action(action, label, "ortho"))
         self.model_view.surveyRay.connect(self._survey_pick_ray)
         self.model_view.surveyEditRays.connect(self._survey_edit_rays)
@@ -206,8 +208,12 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.setCorner(Qt.BottomRightCorner, R)
         self.docks = {
             "Project": self._dock("Project", self._workspace_panel(), L, "project"),
-            "Markers": self._dock("Markers", markers_panel(self.markers_pane), L, "markers"),
-            "Cameras": self._dock("Cameras", self.reference, L, "cameras"),
+            "Markers": self._dock("Ground Control Point",
+                                  markers_panel(self.markers_pane, self._safe("Import GCPs", self.import_markers),
+                                                self._safe("GCP coordinate system", self.change_gcp_coordinates),
+                                                self.marker_prediction_count),
+                                  L, "markers"),
+            "Cameras": self._dock("Cameras", cameras_panel(self.reference), L, "cameras"),
             "Photos": self._dock("Photos", photos_panel, R, "photos"),
             "Console": self._dock("Console", self.console, B, "console"),
             "Jobs": self._dock("Jobs", self.jobs, B, "jobs"),
@@ -231,8 +237,6 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.reference.cameraActivated.connect(self._safe("Open Photo", self.open_photo))
         self.markers_pane.markerToggled.connect(self.toggle_marker)
         self.markers_pane.itemSelectionChanged.connect(self._marker_selection_changed)
-        self.photo_view.placeMarker.connect(self._safe("Place Marker", self.place_marker))
-        self.photo_view.removeMarker.connect(self.remove_marker_projection)
         self.photo_view.addMarker.connect(lambda u, v: self.add_marker_at_photo(u, v))
         self.photo_view.pinMarker.connect(lambda lab, u, v: self.pin_marker(lab, u, v))
         self.markers_pane.markerEdited.connect(self._marker_edited)
@@ -302,22 +306,14 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             self.show_view(self.ortho_view if self.ortho_view.has_raster() else self.model_view)
 
     def _goto_marker(self, label):
-        """Open the first photo where the marker is placed (pinned first)."""
-        ms = [m for m in (self.dataset.markers or []) if m["label"] == label]
-        if not ms:
-            return
-        for r in range(self.markers_pane.rowCount()):
-            if self.markers_pane.item(r, 0) and self.markers_pane.item(r, 0).data(Qt.UserRole) == label:
-                self.markers_pane.selectRow(r); break
-        proj = ms[0].get("projections") or {}
-        order = sorted(proj, key=lambda n: not (len(proj[n]) < 3 or proj[n][2]))
-        from .photonames import marker_camera_keys
-        stems = {key: index for index, key in marker_camera_keys(self.dataset).items()}
-        for n in order:
-            k = stems.get(os.path.splitext(n)[0].lower())
-            if k is not None:
-                self.open_photo(k); return
-        self.statusBar().showMessage(f"Marker {label} has no projections", 4000)
+        """Open the first photo with a placement, preferring manual pins."""
+        self._select_marker_row(label)
+        locations = next(self._gcp_photo_locations([label]), {})
+        priority = {"pinned": 0, "placed": 1, "predicted": 2, "ignored": 3}
+        if locations:
+            self.open_photo(min(locations, key=lambda index: priority[locations[index][2]]))
+        else:
+            self.statusBar().showMessage(f"GCP {label} has no projections", 4000)
 
     def _handlers(self):
         h = {
@@ -556,9 +552,10 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
     def _start_resource_monitor(self):
         """CPU / GPU load in the status bar; unavailable GPU sampling is shown explicitly."""
         from .statusmon import ResourceMonitor
-        self.cpu_label = QLabel("CPU  --"); self.gpu_label = QLabel("GPU unavailable")
+        self.cpu_label = QLabel("CPU  --"); self.gpu_label = QLabel("GPU usage —")
+        self.cpu_label.setToolTip("Total system CPU load")
+        self.gpu_label.setToolTip("System GPU usage. CUDA processing is checked separately.")
         for lab in (self.cpu_label, self.gpu_label):
-            lab.setToolTip("System load (updated every 1.5 s)")
             self.statusBar().addPermanentWidget(lab)
         self.monitor = ResourceMonitor(parent=self)
         self.monitor.sampled.connect(self._show_resources)
@@ -567,15 +564,37 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.monitor.start()
 
     def _show_resources(self, d):
-        from .statusmon import format_cpu, format_gpu
+        from .statusmon import INTERVAL, format_cpu, format_gpu
         self.cpu_label.setText(format_cpu(d.get("cpu")))
-        if d.get("gpu") is None:
-            self.gpu_label.setText("GPU unavailable")
+        cards = d.get("gpu_cards", ())
+        timestamp = d.get("gpu_time")
+        age = time.monotonic() - timestamp if timestamp is not None else 0.0
+        error = d.get("gpu_error", "")
+        if not cards:
+            self.gpu_label.setText("GPU usage unavailable")
+            self.gpu_label.setToolTip("\n".join(filter(None, ("System GPU usage could not be read. Retrying automatically.",
+                                                              error, "CUDA processing is checked separately."))))
         else:
-            self.gpu_label.setText(format_gpu(d["gpu"]))
-            if d.get("gpu_name"):
-                self.gpu_label.setToolTip(f"{d['gpu_name']}: GPU load and memory (NVIDIA NVML)")
-            self.gpu_label.show()
+            if len(cards) == 1:
+                card = cards[0]
+                label = format_gpu(card.load) if card.load is not None else "GPU load —"
+                if card.load is None and card.used is not None:
+                    label += f" · VRAM {card.used / 1024:.1f} GB"
+            elif len(cards) == 2:
+                label = " · ".join(f"GPU {card.index} {card.load:.0f}%" if card.load is not None
+                                   else f"GPU {card.index} —" for card in cards)
+            else:
+                label = f"{len(cards)} GPUs · hover for usage"
+            last = age >= 2 * INTERVAL
+            self.gpu_label.setText(f"{label} · last" if last else label)
+            details = [f"NVIDIA {card.index} · {card.name or 'GPU'}"
+                       f" · {f'load {card.load:.0f}%' if card.load is not None else 'load unavailable'}"
+                       f" · {f'VRAM {card.used / 1024:.1f}/{card.total / 1024:.0f} GB' if card.used is not None and card.total else 'VRAM unavailable'}"
+                       for card in cards]
+            details.append(f"{d.get('gpu_source') or 'NVIDIA driver'} · sampled {age:.1f} s ago")
+            if error:
+                details.append(error)
+            self.gpu_label.setToolTip("\n".join(details))
         tile = self.model_view.tiled_item()
         if tile is not None and tile.pending:
             self.busy_indicator.background("model-tiles", "Loading 3D tiles",
@@ -593,7 +612,10 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.reference.refresh(self.dataset)
         self._refresh_markers_pane()
         self._marker_selection_changed()
+        self._update_photo_markers()
         self.photos.refresh(self.dataset)
+        if self._photo_filter:
+            self._update_gcp_photo_filter()
         self._update_title()
         self._update_stale_banners()
         self._update_menu_actions()
@@ -697,11 +719,11 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                 except Exception as e:  # noqa: BLE001
                     out["errors"].append(f"Tie point statistics: {e}")
             if want_markers:
-                emit(self._viewProgress, gen, f"[{len(jobs) + int(want_stats)}/{len(jobs) + int(want_stats) + int(want_markers)}] Locating markers...")
+                emit(self._viewProgress, gen, f"[{len(jobs) + int(want_stats)}/{len(jobs) + int(want_stats) + int(want_markers)}] Locating GCPs...")
                 try:
                     out["markers"] = context._marker_positions()
                 except Exception as e:  # noqa: BLE001
-                    out["errors"].append(f"Markers: {e}")
+                    out["errors"].append(f"GCPs: {e}")
             out["model_cache"] = getattr(context, "_model_cache", (None,))
             out["marker_cache"] = getattr(context, "_marker_xyz_cache", None)
             emit(self._viewData, gen, out)
@@ -859,7 +881,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         kind = info["kind"]
         if kind == "project":
             rows = [("Project", self.project.path or "Untitled"), ("Images", len(ch.cameras)),
-                    ("Markers", len(ch.markers)), ("CRS", ch.crs or "Local"), ("Version", APP_VERSION)]
+                    ("GCPs", len(ch.markers)), ("CRS", ch.crs or "Local"), ("Version", APP_VERSION)]
             if ch.georef:
                 rows += [('Model coordinate frame', processing_crs(ch.georef)),
                          ('Reference height datum', ch.georef.get('height_reference', 'unknown'))]
@@ -917,7 +939,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             labels = [l for l in labs.split("\x1f") if l]
             if labels == ["*"]:
                 labels = [m["label"] for m in self.dataset.markers or []]
-            self._marker_pane_action({"Remove Marker": "Remove Markers"}.get(act, act), labels)
+            self._marker_pane_action({"Rename GCP...": "Rename GCP",
+                                      "Filter Photos by GCPs": "Open photos",
+                                      "Reset Filter": "All photos"}.get(act, act), labels)
             return
         elif action.startswith("set_camera:"):
             _t, k, on = action.split(":")
@@ -986,7 +1010,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.photos._photo_identity = None
         self._marker_init()
         self._model_cache = (None,)
-        self._marker_xyz_cache = None
+        self._marker_xyz_cache = self._gcp_photo_context_cache = None
+        self._photo_coordinate_camera = None
         for raster in getattr(self, "_prepared_rasters", {}).values():
             raster.close()
         self._prepared_rasters = {}
@@ -1460,7 +1485,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             try:
                 self._update_photo_markers()
             except Exception as e:
-                self.log(f"Markers overlay: {e}")
+                self.log(f"GCP overlay: {e}")
             try:
                 self._update_photo_shapes()
             except Exception as e:  # noqa: BLE001
@@ -1478,7 +1503,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             QMessageBox.information(self, "Rotate Photo", "Open a photo first.")
             return
         self.show_view(self.photo_view)
-        self.photo_view.view.rotate(deg)
+        self.photo_view.rotate(deg)
 
     # ------------------------------------------------------------ Workflow
     def add_photos(self, paths=None):
@@ -1648,7 +1673,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         return exe
 
     def _run(self, title, steps, on_success, meta=None, params=None, on_fail=None, engine_exe=None,
-             product=None):
+             product=None, photos=0):
         """meta: callable(seconds, stage_seconds) run after on_success, to record
         processing metadata (procmeta.record) for the step. params: the step's
         settings (dialog values), for the error report if it fails. on_fail: run
@@ -1670,15 +1695,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         if self.runner is not None and getattr(self.runner, "busy", False):
             QMessageBox.information(self, title, "Another processing task is running."); return
         dlg = ProgressDialog(title, self)
-        self.runner = cm.PipelineRunner(exe, steps, self)
-        self.runner.progress.connect(dlg.set_progress)
-        self.runner.detail.connect(dlg.set_detail)
-        stage_signal = getattr(self.runner, "stageProgress", None)
-        if stage_signal is not None:
-            stage_signal.connect(dlg.set_stage_progress)
-            stage_signal.connect(lambda fraction, text: self.busy_indicator.background(
-                "pipeline-detail", title, fraction * 1000 if fraction >= 0 else 0,
-                1000 if fraction >= 0 else 0, text))
+        self.runner = cm.PipelineRunner(exe, steps, self, photos=photos)
+        self.runner.stageProgress.connect(dlg.set_stage_progress)
         self.runner.log.connect(dlg.append)
         self.runner.log.connect(self.console.write)
         dlg.cancel_btn.clicked.connect(self.runner.cancel)
@@ -1686,20 +1704,19 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         t0 = time.perf_counter()
         stage_t = []                                   # [(label, start)]
 
-        def on_progress(_pct, label):
-            dlg.set_operation_steps(sum(1 for name, _, _ in self.runner.steps if name not in ("log", "gate"))
-                                    if hasattr(self.runner, "steps") else len(steps))
-            if label and (not stage_t or stage_t[-1][0] != label) and label != "Finished":
-                dlg.begin_stage()
-                stage_t.append((label, time.perf_counter()))
-        self.runner.progress.connect(on_progress)
+        def step_started(label):
+            if label == "gate":
+                dlg.begin_stage("Checking intermediate results")
+                return
+            dlg.begin_stage(label)
+            stage_t.append((label, time.perf_counter()))
+        self.runner.stepStarted.connect(step_started)
         job = f"{title} - {os.path.splitext(os.path.basename(self.project.path))[0] or 'Untitled'}"
         self.jobs.add_job(f"[running] {job}")
         mark = self.console.mark()
         load_tb = []
         def done(ok, msg):
             dlg.running = False
-            dlg._timer.stop()
             dt = time.perf_counter() - t0
             self.jobs.add_job(f"[{'done' if ok else 'failed'}] {job}  ({dt:.1f} s)")
             current = self.project is owner_project and self.dataset is owner_dataset
@@ -1707,6 +1724,11 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             if not current:
                 ok, msg = False, "Project changed during processing; results remain on disk. Reopen the original project to import them."
             if ok:
+                dlg.begin_stage("Finalizing results...")
+                dlg.cancel_btn.setEnabled(False)
+                dlg.stage.repaint()
+                dlg.stage_bar.repaint()
+                dlg.timing.repaint()
                 try:
                     on_success()
                     if product is not None:
@@ -1731,6 +1753,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                     self.refresh_all()
                 except Exception as e:  # noqa: BLE001 - metadata must never fail a step
                     self.log(f"{title}: could not record processing metadata: {e}")
+            dlg.cancel_btn.setEnabled(True)
             dlg.cancel_btn.setText("Close")
             dlg.cancel_btn.clicked.disconnect(); dlg.cancel_btn.clicked.connect(dlg.accept)
             if ok:
@@ -1760,7 +1783,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
 
         def end_busy(*_):                    # wait cursor restored first (also on error / cancel)
             if not ended:
-                ended.append(1); self.busy_indicator.background("pipeline-detail")
+                ended.append(1)
                 self.busy_indicator.end()
         self.runner.finished.connect(end_busy)
         self.runner.finished.connect(done)
@@ -1783,6 +1806,8 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         if not exe:
             return
         from . import alignment_resume
+        from .alignment_reference import GEOREF_FIELDS, alignment_reference_config, gcp_crs
+        self._photo_map(ch)  # recover legacy identities before checking observations
         saved=alignment_resume.pending(self.project.data_dir,ch)
         if saved:
             answer=QMessageBox.question(self,'Resume alignment',
@@ -1803,11 +1828,11 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         from .photo_gps import use_photo_gps
         if not use_photo_gps(ch):
             s["reference"] = False
+            s["gps_priors"] = False
+            if saved and s.get("gps_frame"):
+                QMessageBox.warning(self, "Align Photos", "The saved alignment uses photo GPS. Enable photo GPS or start a new alignment.")
+                return
             s["gps_frame"] = False
-        if hasattr(dlg, "workflow_status"):
-            s.update(dlg.workflow_status())
-        original_wd = self.project.default_workdir(ch)
-        self._photo_map(ch)  # recover legacy identities before generating new aliases
         import uuid
         wd = saved[0] if saved else os.path.join(self.project.data_dir, "alignment-" + uuid.uuid4().hex[:12])
         try:
@@ -1816,33 +1841,38 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                 raise OSError('Photo aliases changed; start a new alignment instead of resuming')
         except OSError as e:
             QMessageBox.critical(self, "Align Photos", f"Cannot prepare working folder {wd}:\n{e}"); return
+        try:
+            reference_cfg = alignment_reference_config(ch, s, mapping, wd)
+        except ValueError as error:
+            QMessageBox.warning(self, "Align Photos", str(error))
+            return
         enabled = [c for c in ch.cameras if c.enabled]
-        if s["mode"] == "Fast" and any(not (c.desc and os.path.exists(c.desc)) for c in enabled):
+        if not saved and s["mode"] == "Fast" and s.get("generic", True):
             from .fastpipe import analyze_images
-            self.cancel_thumbnails()
-            paths = [c.path for c in enabled]
-            cache = os.path.join(wd, "cache")
-            infos, cancelled, err = run_modal(
-                self, "Align Photos", "Preparing photos (thumbnails / global descriptors)...",
-                lambda report, cancelled: analyze_images(paths, cache, progress=lambda i, n, *_: report(i, n),
-                                                         cancel=cancelled), len(paths))
-            if cancelled or err:
-                if err:
-                    self.show_error("Align Photos", f"Could not read the photos:\n{err}",
-                                    step="Align Photos: prepare photos", params=s)
-                return
-            for c in enabled:
-                i = infos.get(c.path, {})
-                c.desc, c.width, c.height = i.get("desc", ""), i.get("width", 0), i.get("height", 0)
+            missing = [c for c in enabled if not (c.desc and os.path.isfile(c.desc))]
+            if missing:
+                self.cancel_thumbnails()
+                paths = [c.path for c in missing]
+                cache = os.path.join(wd, "cache")
+                infos, cancelled, err = run_modal(
+                    self, "Align Photos", "Preparing photos for visual pair selection...",
+                    lambda report, cancelled: analyze_images(paths, cache, progress=lambda i, n, *_: report(i, n),
+                                                             cancel=cancelled),
+                    len(paths))
+                if cancelled or err:
+                    if err:
+                        self.show_error("Align Photos", f"Could not read the photos:\n{err}",
+                                        step="Align Photos: prepare photos", params=s)
+                    return
+                for camera in missing:
+                    info = infos.get(camera.path, {})
+                    if info.get("desc"):
+                        camera.desc = info["desc"]
+                        camera.width, camera.height = info["width"], info["height"]
         names = [mapping[c.path] for c in enabled]
         if not saved:
             s["calibration_groups"] = {mapping[path]: group for path,group in s.get("calibration_groups",{}).items()
                                        if path in mapping}
-        from .photo_gps import camera_gps
-        ch.reference_settings['reported_gps_accuracy'] = s.get('reported_gps_accuracy', False)
-        from .photo_gps import camera_accuracies
-        alignment_gps = camera_gps(ch, mapping) if s.get("gps_frame") else {}
-        alignment_accuracies = camera_accuracies(ch, mapping) if s.get('gps_priors') else {}
         previous_poses = {mapping[c.path]: {"center":c.est,"rotation":c.rot}
                           for c in enabled if c.aligned and c.est is not None and c.rot is not None}
         resume_record=saved[1] if saved else alignment_resume.create(wd,ch,s,mapping)
@@ -1853,27 +1883,17 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             s.update(execution_settings(selected,s,wd,probe_logs.append))
             planned = (alignment_resume.steps(selected,wd,resume_record,ch,s) if saved else
                        cm.align_steps(selected, ch, wd, s, names=names, infos=[c.info() for c in enabled]))
-            if previous_poses:
+            index = next((i for i, (label, *_) in enumerate(planned) if label == "Exporting tie points"), len(planned))
+            if reference_cfg:
+                path = os.path.join(wd, "alignment_reference.json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(reference_cfg, handle)
+                planned.insert(index, ("Applying alignment references", [cm.PYTHON, "georef", path], 2))
+            elif previous_poses:
                 path=os.path.join(wd,"preserve_frame.json")
                 with open(path,"w",encoding="utf-8") as fh:
                     json.dump({"model":os.path.join(wd,"sparse","0"),"cameras":previous_poses},fh)
-                index=next((i for i,(label,*_) in enumerate(planned) if label=="Exporting tie points"),len(planned))
                 planned.insert(index,("Preserving project frame",[cm.PYTHON,"preserve_frame",path],2))
-            if s.get("gps_frame"):
-                gps_path = os.path.join(wd, "alignment_gps.json")
-                from .georef import DEFAULTS
-                gps_cfg = {"model": os.path.join(wd,"sparse","0"), "markers": [],
-                           "crs": ch.crs or "EPSG:4326", "use_markers": False, "use_cameras": True,
-                           "camera_gps": alignment_gps, "camera_accuracies": alignment_accuracies,
-                           "accuracies": {key: ch.reference_settings.get(key, value) for key, value in DEFAULTS.items()},
-                           "camera_height_reference": ch.reference_settings.get('camera_height_reference', 'unknown'),
-                           "fit_intrinsics": False,
-                           "bundle": bool(s.get('gps_priors')), "transform_files": [], "result": os.path.join(wd,"alignment_georef.json"),
-                           "report": os.path.join(wd,"alignment_georef.txt")}
-                with open(gps_path,"w",encoding="utf-8") as handle:
-                    json.dump(gps_cfg,handle)
-                index=next((i for i,(label,*_) in enumerate(planned) if label=="Exporting tie points"),len(planned))
-                planned.insert(index,("Applying camera GPS frame",[cm.PYTHON,"georef",gps_path],2))
             validation_path=os.path.join(wd,"validate_model.json")
             with open(validation_path,"w",encoding="utf-8") as handle:
                 json.dump({"model":os.path.join(wd,"sparse","0")},handle)
@@ -1886,17 +1906,33 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             poses = cm.read_images_txt(os.path.join(wd, "sparse_txt", "images.txt"))
             if not poses:
                 raise ValueError("No camera poses were produced; previous alignment was kept")
+            result = None
+            if reference_cfg:
+                with open(reference_cfg["result"], encoding="utf-8") as handle:
+                    result = json.load(handle)
+            tie_point_count = cm.count_points3d(os.path.join(wd, "sparse_txt", "points3D.txt"))
+            resume_record['phase'] = 'complete'
+            alignment_resume.save(os.path.join(wd, 'alignment-resume.json'), resume_record)
             ch.workdir = wd
-            if s.get("gps_frame"):
-                with open(os.path.join(wd,"alignment_georef.json"),encoding="utf-8") as handle:
-                    result=json.load(handle)
-                ch.georef = {key:result.get(key) for key in ("offset","similarity","crs","crs_kind","zone","rows","control_rmse","check_rmse","coordinate_frame","height_reference","camera_height_reference","marker_height_reference","reference_heights_verified","marker_image_errors")}
+            if reference_cfg and reference_cfg["use_cameras"] and reference_cfg["bundle"]:
+                ch.reference_settings['reported_gps_accuracy'] = s.get('reported_gps_accuracy', False)
+            self._invalidate_camera_products(ch)
+            if result:
+                if s.get("use_gcps"):
+                    ch.reference_settings["gcp_crs"] = s.get("gcp_crs") or gcp_crs(ch)
+                elif ch.markers:
+                    ch.reference_settings.setdefault("gcp_crs", gcp_crs(ch))
+                ch.georef = {key: result.get(key) for key in GEOREF_FIELDS}
                 ch.crs = result["crs"]
-                self.log("Camera GPS applied: model scale/orientation/location are metric. GPS accuracy still limits survey accuracy.")
-            if wd != original_wd:
-                self._invalidate_camera_products(ch)
-                if ch.georef:
-                    ch.georef.update(rows=[], control_rmse=None, check_rmse=None, marker_image_errors={})
+                if s.get("gps_frame") and s.get("use_gcps"):
+                    ch.reference_settings["camera_height_reference"] = reference_cfg["camera_height_reference"]
+                    ch.reference_settings["marker_height_reference"] = reference_cfg["marker_height_reference"]
+                self.log(f"Alignment references applied. Report: {reference_cfg['report']}")
+            elif ch.georef:
+                ch.georef.update(rows=[], control_rmse=None, check_rmse=None, marker_image_errors={})
+            estimates = (result or {}).get("markers", {})
+            for point in ch.markers:
+                point["est"] = estimates.get(point["label"], {}).get("est")
             from .photonames import assign_names
             assign_names(ch, mapping)              # exact camera <-> model link, saved in the project
             for c in ch.cameras:
@@ -1905,9 +1941,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                 c.est = p[0].tolist() if p else None
                 c.rot = p[1].tolist() if p else None
             ch.tie_points_ply = os.path.join(wd, "tie_points.ply")
-            ch.tie_point_count = cm.count_points3d(os.path.join(wd, "sparse_txt", "points3D.txt"))
-            resume_record['phase']='complete'
-            alignment_resume.save(os.path.join(wd,'alignment-resume.json'),resume_record)
+            ch.tie_point_count = tie_point_count
             self.set_modified(); self.reload_view()
             self.show_view(self.model_view)
             self._report_unaligned([c for c in enabled if not c.aligned], len(enabled))
@@ -1919,7 +1953,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
                                 ("Estimating", "Triangulating", "Registering", "Optimizing", "Reconstruct",
                                  "Mapping", "Bundle"))), 2) or None)
             ch.meta.pop("sparse_stats", None)          # recomputed by the view loader
-        self._run("Align Photos", steps, loaded, meta, params=s, product="tie")
+        self._run("Align Photos", steps, loaded, meta, params=s, product="tie", photos=len(enabled))
 
     def _report_unaligned(self, missing, total):
         """List photos that could not be aligned (Console + status bar) so the
@@ -2538,7 +2572,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             positions = {label: X for label, X, _control in (self._marker_positions() or [])}
         except Exception:
             positions = {}
-        markers = []
+        markers, heights = [], {}
         offset = np.asarray((ch.georef or {}).get("offset") or [0, 0, 0], float)
         for marker in ch.markers or []:
             X = positions.get(marker["label"])
@@ -2551,8 +2585,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             else:
                 continue
             markers.append((marker["label"], float(point[0]), float(point[1])))
+            heights[marker["label"]] = float(point[2])
         self.ortho_view.marker_states = {m["label"]: marker_state(m) for m in ch.markers or []}
-        self.ortho_view.set_markers(markers)
+        self.ortho_view.set_markers(markers, heights)
 
     def show_ortho(self, kind):
         """Display > Ortho Product > Orthomosaic / DEM (and the Workspace rows): show the layer in the Ortho tab."""
