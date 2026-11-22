@@ -197,9 +197,10 @@ class ReferenceMixin:
         self._update_ortho_markers()
 
     def _marker_selection_changed(self):
-        self._update_photo_markers()
-        labels = self.markers_pane.selected_labels()
-        self.ortho_view.set_active_marker(labels[0] if len(labels) == 1 else None)
+        labels = frozenset(self.markers_pane.selected_labels())
+        self.photo_view.set_marker_selection(labels, self.markers_pane.current_label())
+        self.ortho_view.set_marker_selection(labels)
+        self.model_view.set_marker_selection(labels)
 
     def _photo_gcp_context(self):
         """Source identities and calibrated photo models for display and filtering."""

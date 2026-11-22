@@ -612,6 +612,7 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.reference.refresh(self.dataset)
         self._refresh_markers_pane()
         self._marker_selection_changed()
+        self._update_photo_markers()
         self.photos.refresh(self.dataset)
         if self._photo_filter:
             self._update_gcp_photo_filter()

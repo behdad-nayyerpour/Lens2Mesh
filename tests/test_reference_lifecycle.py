@@ -35,6 +35,7 @@ def test_project_switch_drops_marker_overlays_history_and_pending(window, tmp_pa
     window.edit_marker_cell(label, 1, "123")
     assert window._mk_undo and window._ref_pending
     assert window.model_view.overlay.markers is not None
+    assert window.model_view.overlay.selected_markers == {label}
     # Queued cell edits must not leak into another project with the same marker label.
     window._marker_edited(label, 2, "999")
     target = ProjectData(markers=[g.Marker(label).to_dict()])
@@ -51,7 +52,10 @@ def test_project_switch_drops_marker_overlays_history_and_pending(window, tmp_pa
     window.wait_view_loaded()
     assert window.model_view.overlay.markers is None
     assert window.ortho_view.markers == []
-    assert window.ortho_view.active_marker is None
+    assert not window.markers_pane.selected_labels()
+    assert not window.photo_view._selected_markers
+    assert not window.ortho_view._selected_markers
+    assert not window.model_view.overlay.selected_markers
     assert window._ref_pending == {} and window.markers_pane.pending == {}
     assert not window.undo_markers() and not window.redo_markers()
     assert all(m["ref"] is None for m in window.dataset.markers)
@@ -148,8 +152,12 @@ def test_ortho_context_selects_marker_without_any_edit_actions(window,tmp_path,m
     assert not window.markers_pane.isRowHidden(0)
     assert painted_flags == painted_labels == [HOVER_COLOR]
     assert view._hovered_flag is None
+    assert window.markers_pane.selected_labels() == ["G1"]
     render()
-    assert painted_flags == painted_labels == [HOVER_COLOR, color("predicted")]
+    assert painted_flags == painted_labels == [HOVER_COLOR, HOVER_COLOR]
+    window.markers_pane.clearSelection()
+    render()
+    assert painted_flags == painted_labels == [HOVER_COLOR, HOVER_COLOR, color("predicted")]
     actions.clear()
     elsewhere = event_pos + QPoint(40, 40)
     view.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, elsewhere, elsewhere))

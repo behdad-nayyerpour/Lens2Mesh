@@ -491,9 +491,82 @@ def test_photo_context_hover_and_navigation(window, tmp_path, monkeypatch, qtbot
     assert canvas.cursor().shape() == Qt.ArrowCursor
 
 
+
+def test_gcp_table_selection_highlights_visible_flags_and_restores_their_colors(window, tmp_path, qtbot, monkeypatch):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QImage, QPainter
+    from photomesh import orthoview
+    from photomesh.marker_style import HOVER_COLOR, color
+
+    ch = _scene(window, tmp_path)
+    ch.markers = [
+        g.Marker("A", projections={"img_0001": [500, 400, True]}).to_dict(),
+        g.Marker("B", projections={"img_0001": [680, 400, False, "refined"]}).to_dict(),
+        g.Marker("not in view").to_dict(),
+    ]
+    window.refresh_all()
+    window.open_photo(0)
+    window._show_dock("Markers", True)
+    photo, ortho, model = window.photo_view, window.ortho_view, window.model_view
+    table = window.markers_pane
+    ortho.center, ortho.scale = (10., 0.), 3.
+    ortho.marker_states = model.marker_states = {"A": "pinned", "B": "placed"}
+    ortho.set_markers([("A", 0., 0.), ("B", 20., 0.)])
+    model.set_markers([[-.5, 0, 0], [.5, 0, 0]], labels=["A", "B"], control=[True, False])
+    first_photo_flag = photo._flags["A"]
+
+    painted_ortho_flags = []
+    monkeypatch.setattr(orthoview, "draw_flag", lambda _p, _x, _y, col, _active: painted_ortho_flags.append(col))
+
+    def assert_colors(a, b):
+        expected = [a, b]
+        assert [photo._flags[name].display_color() for name in ("A", "B")] == expected
+        assert [photo._flags[name].label_item.brush().color() for name in ("A", "B")] == expected
+        image = QImage(ortho.size(), QImage.Format_ARGB32)
+        painter = QPainter(image)
+        try:
+            painted_ortho_flags.clear()
+            ortho._paint(painter)
+        finally:
+            painter.end()
+        assert painted_ortho_flags == expected
+        assert [item[3] for item in model.overlay.items(np.eye(4), 200, 100)] == expected
+
+    def click(row, modifier=Qt.NoModifier):
+        cell = table.visualItemRect(table.item(row, 0)).center() + QPoint(10, 0)
+        qtbot.mouseClick(table.viewport(), Qt.LeftButton, modifier, pos=cell)
+
+    green, blue = color("pinned"), color("placed")
+    assert_colors(green, blue)
+    click(0)
+    assert table.selected_labels() == ["A"]
+    assert_colors(HOVER_COLOR, blue)
+    click(1, Qt.ControlModifier)
+    assert table.selected_labels() == ["A", "B"]
+    assert_colors(HOVER_COLOR, HOVER_COLOR)
+    click(1)
+    assert table.selected_labels() == ["B"]
+    assert_colors(green, HOVER_COLOR)
+    assert photo._flags["A"] is first_photo_flag
+
+    # A hover can still highlight another flag during a table selection.
+    qtbot.mouseMove(photo.view.viewport(), photo.view.mapFromScene(QPointF(500, 400)))
+    assert photo._flags["A"].display_color() == HOVER_COLOR
+    table.clearSelection()
+    assert photo._flags["A"].display_color() == HOVER_COLOR
+    assert photo._flags["B"].display_color() == blue
+    photo._clear_photo_cursor()
+    assert_colors(green, blue)
+    click(2)
+    assert table.selected_labels() == ["not in view"]
+    assert_colors(green, blue)
+
+
 def test_photo_reports_mesh_coordinates_and_original_image_pixels(window, tmp_path, qtbot):
     import re
-    from PySide6.QtCore import QPointF
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
 
     ch = _scene(window, tmp_path)
     ch.model_ply = _ground_ply(str(tmp_path / "ground.ply"))
@@ -501,10 +574,16 @@ def test_photo_reports_mesh_coordinates_and_original_image_pixels(window, tmp_pa
     window.open_photo(0)
     view = window.photo_view
 
+    def move_cursor(screen):
+        viewport = view.view.viewport()
+        event = QMouseEvent(QEvent.MouseMove, QPointF(screen), QPointF(viewport.mapToGlobal(screen)),
+                            Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(viewport, event)
+
     def assert_cursor():
         screen = view.view.mapFromScene(QPointF(500, 400))
         pixel = view.view.mapToScene(screen)
-        qtbot.mouseMove(view.view.viewport(), screen)
+        move_cursor(screen)
         qtbot.waitUntil(lambda: "Z: 50.000 m" in view.coordinates.text(), timeout=30000)
         lines = view.coordinates.text().splitlines()
         assert len(lines) == 2
@@ -517,10 +596,10 @@ def test_photo_reports_mesh_coordinates_and_original_image_pixels(window, tmp_pa
     view.zoom(2)
     view.rotate(90)
     view._clear_photo_cursor()
-    qtbot.mouseMove(view.view.viewport(), view.view.mapFromScene(QPointF(520, 410)))
+    move_cursor(view.view.mapFromScene(QPointF(520, 410)))
     assert_cursor()
     ch.cameras[1].aligned = False
     window.open_photo(1)
-    qtbot.mouseMove(view.view.viewport(), view.view.mapFromScene(QPointF(540, 400)))
+    move_cursor(view.view.mapFromScene(QPointF(540, 400)))
     qtbot.waitUntil(lambda: "px" in view.coordinates.text(), timeout=3000)
     assert view.coordinates.text().splitlines()[0] == "Model: —"

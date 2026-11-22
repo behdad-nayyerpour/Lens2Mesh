@@ -120,7 +120,7 @@ class OrthoView(QWidget):
         self._moving_marker = None
         self.marker_states = {}
         self.marker_heights = {}
-        self.active_marker = None
+        self._selected_markers = frozenset()
         self._hovered_flag = None
         self._context_flag = None
         self._flag_pointer = None
@@ -177,7 +177,7 @@ class OrthoView(QWidget):
         self.workChanged.emit("Loading Ortho tiles", 0, 0, False)
         self.pts = None; self.cams = []; self.markers = []; self.shapes = []
         self.selected_shape = None
-        self.active_marker = None
+        self._selected_markers = frozenset()
         self.marker_heights.clear()
         self._hovered_flag = self._context_flag = self._flag_pointer = None
         self._status_timer.stop()
@@ -218,9 +218,10 @@ class OrthoView(QWidget):
             self._hovered_flag = label
             self.update()
 
-    def set_active_marker(self, label):
-        self.active_marker = label
-        self.update()
+    def set_marker_selection(self, labels):
+        if labels != self._selected_markers:
+            self._selected_markers = labels
+            self.update()
 
     def set_survey_line(self, points):
         self.survey_line = None if points is None else np.asarray(points, float)
@@ -603,8 +604,9 @@ class OrthoView(QWidget):
                 x, y = self.to_screen(X, Y)
                 if -20 < x < self.width() + 20 and -20 < y < self.height_px() + 20:
                     hovered = lab == self._hovered_flag and not getattr(self, "survey_enabled", False)
-                    col = HOVER_COLOR if hovered else color(self.marker_states.get(lab, "predicted"))
-                    draw_flag(p, x, y, col, lab == self.active_marker)
+                    selected = lab in self._selected_markers
+                    col = HOVER_COLOR if selected or hovered else color(self.marker_states.get(lab, "predicted"))
+                    draw_flag(p, x, y, col, selected)
                     if self.vis.get("marker_labels", True):
                         rect = p.fontMetrics().boundingRect(str(lab)).adjusted(-4, -2, 4, 2)
                         rect.moveBottomLeft(QPointF(x + 18, y - 18).toPoint())

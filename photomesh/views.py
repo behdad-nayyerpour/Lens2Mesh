@@ -644,6 +644,11 @@ class ModelView(QWidget):
             self.overlay.markers = (P, None if labels is None else [str(t) for t in labels], ctl)
         self._overlay_changed()
 
+    def set_marker_selection(self, labels):
+        if labels != self.overlay.selected_markers:
+            self.overlay.selected_markers = labels
+            self._overlay_changed()
+
     def view_mvp(self):
         """Row-major 4x4 MVP of the current view (display frame), or None."""
         if self.gl is None:
@@ -1092,11 +1097,12 @@ class _ZoomView(QGraphicsView):
 
 
 class _PhotoFlag(QGraphicsItem):
-    def __init__(self, state, active):
+    def __init__(self, state, active, selected):
         from .marker_style import color
         super().__init__()
         self.colour = color(state)
         self.active = active
+        self.selected = selected
         self.hovered = False
         self.label_item = None
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
@@ -1107,10 +1113,18 @@ class _PhotoFlag(QGraphicsItem):
 
     def display_color(self):
         from .marker_style import HOVER_COLOR
-        return HOVER_COLOR if self.hovered else self.colour
+        return HOVER_COLOR if self.hovered or self.selected else self.colour
 
     def set_hovered(self, hovered):
         self.hovered = hovered
+        self._refresh_highlight()
+
+    def set_selection(self, selected, active):
+        if (selected, active) != (self.selected, self.active):
+            self.selected, self.active = selected, active
+            self._refresh_highlight()
+
+    def _refresh_highlight(self):
         if self.label_item is not None:
             self.label_item.setBrush(self.display_color())
         self.update()
@@ -1159,6 +1173,7 @@ class PhotoView(QWidget):
         self._moving_marker = None
         self.markers = []          # (label, u, v, kind) kind: pinned | placed | predicted
         self.active_marker = None
+        self._selected_markers = frozenset()
         self.available_markers = []
         self.ignored_here, self.ignored_all = set(), set()
         self._flags = {}
@@ -1357,6 +1372,7 @@ class PhotoView(QWidget):
         self._overlay = []; self._shape_items = []
         self._flags.clear()
         self.shapes = []; self.markers = []; self.active_marker = None
+        self._selected_markers = frozenset()
         self.available_markers = []
         self.ignored_here.clear()
         self.ignored_all.clear()
@@ -1394,6 +1410,13 @@ class PhotoView(QWidget):
         self.available_markers = list(available or [])
         self.ignored_here, self.ignored_all = set(ignored_here), set(ignored_all)
         self._draw_markers()
+
+    def set_marker_selection(self, labels, active):
+        if (labels, active) == (self._selected_markers, self.active_marker):
+            return
+        self._selected_markers, self.active_marker = labels, active
+        for label, flag in self._flags.items():
+            flag.set_selection(label in labels, label == active)
 
     def set_visible(self, key, on):
         """Show Markers hides the flags, Show Marker Labels only their text."""
@@ -1503,7 +1526,7 @@ class PhotoView(QWidget):
         if self.path is None or not self.vis.get("markers", True):
             return
         for label, u, v, state in self.markers:
-            item = _PhotoFlag(state, label == self.active_marker)
+            item = _PhotoFlag(state, label == self.active_marker, label in self._selected_markers)
             item.setPos(u, v)
             item.setZValue(7)
             scene.addItem(item)
@@ -1515,7 +1538,7 @@ class PhotoView(QWidget):
                 font.setBold(True)
                 font.setPointSizeF(10)
                 text.setFont(font)
-                text.setBrush(item.colour)
+                text.setBrush(item.display_color())
                 text.setPen(QPen(QColor(0, 0, 0, 210), 0.5))
                 text.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
                 text.setAcceptedMouseButtons(Qt.NoButton)
