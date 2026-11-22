@@ -1,6 +1,6 @@
 # Lens2Mesh
 
-**Version 1.0.6.** Fixes alignment with spaces in photo names, panning in Top/Bottom views and full rotation in both viewing directions.
+**Version 1.0.7.** Adds measured stage progress, independent GPS and ground control options, and clearer ground control workflows.
 
 Lens2Mesh is a desktop photogrammetry application for processing aerial and terrestrial
 imagery locally, without a cloud service. It is available at no charge for
@@ -42,17 +42,18 @@ See [image attribution and license](SCREENSHOT-LICENSE.txt).
 
 ## Install
 
-Download `Lens2Mesh_Setup_1.0.6.exe` and its SHA-256 checksum from
+Download `Lens2Mesh_Setup_1.0.7.exe` and its SHA-256 checksum from
 [Releases](https://github.com/behdad-nayyerpour/Lens2Mesh/releases/latest).
 The offline installer includes Python, required packages, COLMAP and the
 compatible legacy GLOMAP engine. A separate Python or Git installation is not
 needed. Close the application before installing. Setup supports fresh installs
 and upgrades and offers destination selection.
-The optional `Lens2Mesh_NeuralGPU_Addon_1.0.6.exe` enables NVIDIA acceleration for
+The optional `Lens2Mesh_NeuralGPU_Addon_1.0.7.exe` enables NVIDIA acceleration for
 ALIKED/LightGlue; those methods use CPU without it. The base Setup retains standard
 COLMAP GPU processing and all offline models. Install the add-on with Lens2Mesh
 closed, into the same folder. No CUDA Toolkit installation is needed.
 Keep projects, processing results, and original photos outside the installation folder.
+Open the [complete PDF manual](photomesh/resources/manual/Lens2Mesh_1.0.7_Complete_User_Manual.pdf) from Help or download it from Releases.
 See [installation and requirements](docs/installation.md) and [updating](UPDATING.md).
 
 ## Main features
