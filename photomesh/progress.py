@@ -92,10 +92,11 @@ class MatchingMeter:
             self.total = int(first_total) if col is None or first_total == second_total == "1" else 0
             self.unit = "photos processed" if "Matching image" in line else "blocks completed"
             self.pending = True
-        elif self.pending and _MATCHED.search(line):
+            line = line[match.end():]
+        if self.pending and _MATCHED.search(line):
             self.pending = False
             self.done += 1
-        else:
+        elif not match:
             return None
         return StageProgress("Matching photos", self.done, self.total, self.unit)
 

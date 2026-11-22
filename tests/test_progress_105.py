@@ -100,3 +100,5 @@ def test_matching_counts_completed_blocks_and_handles_two_index_logs():
     assert (a.done, a.total) == (0, 26)
     b = m.feed("feature_matching.cc:218] in 94.679s")
     assert (b.done, b.total) == (1, 26)
+    legacy = MatchingMeter().feed("Matching block [1/1, 1/1] in 3.279s")
+    assert (legacy.done, legacy.total) == (1, 1)
