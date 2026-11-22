@@ -394,7 +394,7 @@ class ReferenceMixin:
         crs = g.CRS.parse(target_crs)
         frame_changed = g.CRS.parse(original_crs) != crs
         gps_on = use_photo_gps(ch)
-        requested_cameras = s.get("camera_gps_requested", s["use_cameras"]) if gps_on else ch.reference_settings.get("use_cameras", True)
+        requested_cameras = s["use_cameras"] if gps_on else ch.reference_settings.get("use_cameras", True)
         s["use_cameras"] = gps_on and s["use_cameras"]
         reference_settings = dict(s["accuracies"], use_cameras=requested_cameras,
                                   use_photo_gps=gps_on, use_markers=s["use_markers"],

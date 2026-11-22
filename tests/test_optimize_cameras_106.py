@@ -123,6 +123,41 @@ def test_weights_and_incompatible_frame_follow_selected_inputs(window):
     assert not dialog.cam_acc.isEnabled() and not dialog.intrinsic_preset.isEnabled()
 
 
+def test_local_control_unchecks_gps_and_requires_reselecting_it(window):
+    dataset = window.dataset
+    dataset.crs = "EPSG:32638"
+    dataset.reference_settings.update(use_photo_gps=True, gcp_crs="EPSG:32638")
+    dataset.markers = [georef.Marker("P1", [450000., 4400000., 100.]).to_dict()]
+    dialog = OptimizeCamerasDialog(window, {"use_markers": False, "use_cameras": True})
+    dialog.use_markers.setChecked(True)
+    assert dialog.use_cameras.isEnabled() and dialog.use_cameras.isChecked()
+    assert dialog.settings()["use_cameras"]
+    dialog.control_coordinates.setCurrentIndex(dialog.control_coordinates.findData("local"))
+    assert not dialog.use_cameras.isEnabled() and not dialog.use_cameras.isChecked()
+    assert not dialog.settings()["use_cameras"] and not dialog.reported_accuracy.isEnabled()
+    dialog.control_coordinates.setCurrentIndex(dialog.control_coordinates.findData("current"))
+    assert dialog.use_cameras.isEnabled() and not dialog.use_cameras.isChecked()
+
+    dataset.reference_settings["gcp_crs"] = "LOCAL"
+    dialog = OptimizeCamerasDialog(window, {"use_markers": True, "use_cameras": True})
+    assert not dialog.use_cameras.isEnabled() and not dialog.use_cameras.isChecked()
+
+
+def test_optimize_caption_and_full_height_with_local_grid_note(window, qtbot, monkeypatch):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    monkeypatch.setattr(georef, "bundle_memory_status", lambda *_: (2**30, 2**29, 1000))
+    model = synthetic_model(n_img=5, n_pts=100)
+    dialog = OptimizeCamerasDialog(window, model=model)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    assert dialog.button_box.button(QDialogButtonBox.Ok).text() == "Optimize"
+    qtbot.waitUntil(lambda: dialog.settings_scroll.verticalScrollBar().maximum() == 0)
+    dialog.control_coordinates.setCurrentIndex(dialog.control_coordinates.findData("local"))
+    qtbot.waitUntil(lambda: dialog.local_control_note.isVisible()
+                    and dialog.settings_scroll.verticalScrollBar().maximum() == 0)
+
+
 def test_similarity_checks_only_effective_height_references():
     cfg = {"bundle": False, "strict_heights": True, "camera_height_reference": "unknown",
            "marker_height_reference": "ellipsoidal", "adjustment_frame": "enu"}

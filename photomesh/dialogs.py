@@ -1,5 +1,5 @@
 """Processing settings dialogs, progress dialog and preferences."""
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QSpinBox, QCheckBox, QDialogButtonBox,
@@ -48,6 +48,21 @@ class _SettingsDialog(QDialog):
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         outer.addWidget(bb)
+
+    def _fit_content_height(self):
+        self.layout().activate()
+        scroll = self.settings_scroll
+        body = scroll.widget()
+        viewport = scroll.maximumViewportSize()
+        content_height = max(body.minimumSizeHint().height(), body.layout().totalHeightForWidth(viewport.width()))
+        controls_height = self.height() - viewport.height()
+        available = self.screen().availableGeometry()
+        decoration = max(46, self.frameGeometry().height() - self.height() + 12)
+        max_height = available.height() - decoration
+        self.setMaximumHeight(max_height)
+        self.resize(self.width(), min(max(self.height(), content_height + controls_height + 4), max_height))
+        if self.frameGeometry().bottom() > available.bottom():
+            self.move(self.x(), max(available.top(), self.y() - (self.frameGeometry().bottom() - available.bottom())))
 
     def accept(self):
         try:
@@ -285,19 +300,7 @@ class AlignPhotosDialog(_SettingsDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.layout().activate()
-        scroll = self.settings_scroll
-        body = scroll.widget()
-        viewport = scroll.maximumViewportSize()
-        content_height = max(body.minimumSizeHint().height(), body.layout().totalHeightForWidth(viewport.width()))
-        controls_height = self.height() - viewport.height()
-        available = self.screen().availableGeometry()
-        decoration = max(46, self.frameGeometry().height() - self.height() + 12)
-        max_height = available.height() - decoration
-        self.setMaximumHeight(max_height)
-        self.resize(self.width(), min(max(self.height(), content_height + controls_height + 4), max_height))
-        if self.frameGeometry().bottom() > available.bottom():
-            self.move(self.x(), max(available.top(), self.y() - (self.frameGeometry().bottom() - available.bottom())))
+        self._fit_content_height()
 
     def _reference_options(self):
         gps = self.gps_frame.isEnabled() and self.gps_frame.isChecked()
@@ -504,8 +507,11 @@ class OptimizeCamerasDialog(_SettingsDialog):
     def __init__(self, parent=None, settings=None, model=None):
         super().__init__("Optimize Cameras", parent)
         self.setMinimumWidth(760)
+        self.button_box.button(QDialogButtonBox.Ok).setText("Optimize")
+        self._height_timer = QTimer(self)
+        self._height_timer.setSingleShot(True)
+        self._height_timer.timeout.connect(self._fit_content_height)
         from PySide6.QtWidgets import QDoubleSpinBox
-        from PySide6.QtCore import QTimer
         from .georef import DEFAULTS
         s = dict(DEFAULTS); s.update(settings or {})
         self.use_markers = QCheckBox("Use GCPs (XYZ + placements on 2 or more aligned photos)")
@@ -610,7 +616,10 @@ class OptimizeCamerasDialog(_SettingsDialog):
                 text = f"Estimated bundle workspace: {needed / GB:.2f} GiB ({available}); up to {observations:,} observations."
                 if not bundle_workspace_fits(needed, free):
                     text += " Reduce the tie-point limit or fitted calibration parameters to fit available RAM."
-                memory.setText(text)
+                if memory.text() != text:
+                    memory.setText(text)
+                    if self.isVisible():
+                        self._height_timer.start()
 
             update.timeout.connect(estimate)
             for signal in (self.bundle.toggled, self.intr.toggled, self.use_markers.toggled,
@@ -623,14 +632,22 @@ class OptimizeCamerasDialog(_SettingsDialog):
         self.use_cameras.toggled.connect(self._update_control_coordinates)
         self._update_control_coordinates()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_content_height()
+
     def _local_controls(self):
         return self.use_markers.isChecked() and (self._declared_local or self.control_coordinates.currentData() == "local")
 
     def _update_control_coordinates(self):
         local = self._local_controls()
         self.control_coordinates.setEnabled(self.use_markers.isChecked())
-        self.use_cameras.setEnabled(self._photo_gps_enabled and not local)
-        gps = self.use_cameras.isEnabled() and self.use_cameras.isChecked()
+        gps_available = self._photo_gps_enabled and not local
+        if not gps_available:
+            with QSignalBlocker(self.use_cameras):
+                self.use_cameras.setChecked(False)
+        self.use_cameras.setEnabled(gps_available)
+        gps = gps_available and self.use_cameras.isChecked()
         controls = self.use_markers.isChecked()
         bundle = self.bundle.isChecked()
         crs = self._gcp_crs if controls and self._has_control_coordinates else (
@@ -641,8 +658,11 @@ class OptimizeCamerasDialog(_SettingsDialog):
                     "Camera GPS and the previous map origin are excluded from this fit.")
         elif gps and self._model_is_local and not (controls and self._has_control_coordinates):
             note = f"Camera GPS will position the model in {self._gps_crs.name}."
+        note_changed = self.local_control_note.text() != note
         self.local_control_note.setText(note)
         self.local_control_note.setVisible(bool(note))
+        if note_changed and self.isVisible():
+            self._height_timer.start()
         enu_supported = (controls or gps) and not local and crs.kind in ("wgs84", "utm")
         self.adjustment_frame.setEnabled(enu_supported)
         self.reported_accuracy.setEnabled(gps and bundle)
@@ -660,7 +680,6 @@ class OptimizeCamerasDialog(_SettingsDialog):
         local = self._local_controls()
         override = self.use_markers.isChecked() and self.control_coordinates.currentData() == "local"
         return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isEnabled() and self.use_cameras.isChecked(),
-                "camera_gps_requested": self.use_cameras.isChecked(),
                 "local_control_grid": override or (local and not self._model_is_local),
                 "use_local_override": override,
                 "bundle": self.bundle.isChecked(), "fit_intrinsics": self.intr.isEnabled() and self.intr.isChecked(),
