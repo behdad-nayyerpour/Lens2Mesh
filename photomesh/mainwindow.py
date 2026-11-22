@@ -560,8 +560,9 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         """CPU / GPU load in the status bar; unavailable GPU sampling is shown explicitly."""
         from .statusmon import ResourceMonitor
         self.cpu_label = QLabel("CPU  --"); self.gpu_label = QLabel("GPU usage —")
+        self.cpu_label.setToolTip("Total system CPU load")
+        self.gpu_label.setToolTip("System GPU usage. CUDA processing is checked separately.")
         for lab in (self.cpu_label, self.gpu_label):
-            lab.setToolTip("System load (updated every 1.5 s)")
             self.statusBar().addPermanentWidget(lab)
         self.monitor = ResourceMonitor(parent=self)
         self.monitor.sampled.connect(self._show_resources)
@@ -570,19 +571,37 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
         self.monitor.start()
 
     def _show_resources(self, d):
-        from .statusmon import format_cpu, format_gpu
+        from .statusmon import INTERVAL, format_cpu, format_gpu
         self.cpu_label.setText(format_cpu(d.get("cpu")))
-        name = d.get("gpu_name") or "GPU"
-        if d.get("gpu") is None:
+        cards = d.get("gpu_cards", ())
+        timestamp = d.get("gpu_time")
+        age = time.monotonic() - timestamp if timestamp is not None else 0.0
+        error = d.get("gpu_error", "")
+        if not cards:
             self.gpu_label.setText("GPU usage unavailable")
-            self.gpu_label.setToolTip(f"{name}: usage could not be read. Retrying automatically. "
-                                      "CUDA processing is checked separately.")
+            self.gpu_label.setToolTip("\n".join(filter(None, ("System GPU usage could not be read. Retrying automatically.",
+                                                              error, "CUDA processing is checked separately."))))
         else:
-            self.gpu_label.setText(format_gpu(d["gpu"]))
-            source = d.get("gpu_source") or "NVIDIA driver"
-            reading = format_gpu(d["gpu"], d.get("gpu_mem"))
-            self.gpu_label.setToolTip(f"{name}: {reading} ({source})")
-            self.gpu_label.show()
+            if len(cards) == 1:
+                card = cards[0]
+                label = format_gpu(card.load) if card.load is not None else "GPU load —"
+                if card.load is None and card.used is not None:
+                    label += f" · VRAM {card.used / 1024:.1f} GB"
+            elif len(cards) == 2:
+                label = " · ".join(f"GPU {card.index} {card.load:.0f}%" if card.load is not None
+                                   else f"GPU {card.index} —" for card in cards)
+            else:
+                label = f"{len(cards)} GPUs · hover for usage"
+            last = age >= 2 * INTERVAL
+            self.gpu_label.setText(f"{label} · last" if last else label)
+            details = [f"NVIDIA {card.index} · {card.name or 'GPU'}"
+                       f" · {f'load {card.load:.0f}%' if card.load is not None else 'load unavailable'}"
+                       f" · {f'VRAM {card.used / 1024:.1f}/{card.total / 1024:.0f} GB' if card.used is not None and card.total else 'VRAM unavailable'}"
+                       for card in cards]
+            details.append(f"{d.get('gpu_source') or 'NVIDIA driver'} · sampled {age:.1f} s ago")
+            if error:
+                details.append(error)
+            self.gpu_label.setToolTip("\n".join(details))
         tile = self.model_view.tiled_item()
         if tile is not None and tile.pending:
             self.busy_indicator.background("model-tiles", "Loading 3D tiles",
