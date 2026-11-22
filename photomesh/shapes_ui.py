@@ -58,6 +58,8 @@ class ShapesMixin:
         """The dataset's shapes (loaded from its shapes.json, cached by file time)."""
         ch = ch or self.dataset
         info = ch.shapes or {}
+        if info.get("stale_frame"):
+            return None
         p = info.get("path")
         if not p or not os.path.exists(p):
             return None
@@ -79,6 +81,9 @@ class ShapesMixin:
 
     def _store_shapes(self, ch, sset):
         path = (ch.shapes or {}).get("path") or self._shapes_file(ch)
+        if (ch.shapes or {}).get("stale_frame"):
+            import uuid
+            path = os.path.join(os.path.dirname(self._shapes_file(ch)), f"project-{uuid.uuid4().hex[:12]}.json")
         S.save(sset, path)
         old = dict(ch.shapes or {})
         srcs = list(dict.fromkeys([L.get("source") for L in sset["layers"] if L.get("source")]))
@@ -275,7 +280,8 @@ class ShapesMixin:
         sset = self._shape_set(ch)
         if not sset or not sset["shapes"]:
             if options is None:
-                QMessageBox.information(self, "Export Shapes", "No shapes - use File > Import > Import Shapes...")
+                message = (ch.shapes or {}).get("stale_frame") or "No shapes - use File > Import > Import Shapes..."
+                QMessageBox.information(self, "Export Shapes", message)
             return None
         frame = self._frame(ch)
         systems = [("Project coordinate system (" + frame.describe() + ")", S.SrcCRS("project"))]

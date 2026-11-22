@@ -501,10 +501,11 @@ class GradualSelectionDialog(QDialog):
 class OptimizeCamerasDialog(_SettingsDialog):
     """Process > Optimize Cameras: georeference with markers / camera GPS and
     run the GCP-constrained bundle adjustment."""
-    def __init__(self, parent=None, settings=None):
+    def __init__(self, parent=None, settings=None, model=None):
         super().__init__("Optimize Cameras", parent)
         self.setMinimumWidth(760)
         from PySide6.QtWidgets import QDoubleSpinBox
+        from PySide6.QtCore import QTimer
         from .georef import DEFAULTS
         s = dict(DEFAULTS); s.update(settings or {})
         self.use_markers = QCheckBox("Use GCPs (XYZ + placements on 2 or more aligned photos)")
@@ -527,10 +528,14 @@ class OptimizeCamerasDialog(_SettingsDialog):
         for w in (self.use_markers, self.use_cameras, self.bundle, self.intr):
             self.gform.addRow(w)
         self.control_coordinates = QComboBox()
-        from .alignment_reference import gcp_crs, model_crs
+        from .alignment_reference import gcp_crs, gps_output_crs, model_crs
         from .georef import CRS
         declared = gcp_crs(dataset) if dataset is not None else "LOCAL"
-        self._model_is_local = dataset is None or CRS.parse(model_crs(dataset)).kind == "local"
+        self._model_crs = CRS.parse(model_crs(dataset)) if dataset is not None else CRS.parse("LOCAL")
+        self._gcp_crs = CRS.parse(declared)
+        self._gps_crs = CRS.parse(gps_output_crs(dataset))
+        self._model_is_local = self._model_crs.kind == "local"
+        self._has_control_coordinates = bool(dataset and any(m.get("ref") is not None for m in dataset.markers))
         self._declared_local = (CRS.parse(declared).kind == "local" and dataset is not None
                                 and any(point.get("ref") is not None for point in dataset.markers))
         current_label = f"Declared GCP reference ({CRS.parse(declared).name})"
@@ -540,13 +545,11 @@ class OptimizeCamerasDialog(_SettingsDialog):
             "Choose the coordinate system of the entered control XYZ. Use the local grid "
             "after GPS alignment only if the control coordinates are already in that grid.")
         self.gform.addRow("Control coordinates:", self.control_coordinates)
-        self.local_control_note = QLabel(
-            "Fit the existing alignment to the local grid using at least three non-collinear controls. "
-            "Camera GPS and the previous map origin are excluded from this fit.")
+        self.local_control_note = QLabel()
         self.local_control_note.setWordWrap(True)
         self.gform.addRow(self.local_control_note)
         def dspin(v, dec=3, mx=1000):
-            w = QDoubleSpinBox(); w.setDecimals(dec); w.setRange(0.0001, mx); w.setValue(v); return w
+            w = QDoubleSpinBox(); w.setDecimals(dec); w.setRange(10.0 ** -dec, mx); w.setValue(v); return w
         self.cam_acc = dspin(s["camera_accuracy"]); self.cam_acc_z = dspin(s["camera_accuracy_z"])
         self.mk_acc = dspin(s["marker_accuracy"], 4); self.mk_acc_z = dspin(s["marker_accuracy_z"], 4)
         self.proj_acc = dspin(s["projection_accuracy"], 2, 50); self.tie_acc = dspin(s["tie_accuracy"], 2, 50)
@@ -584,6 +587,36 @@ class OptimizeCamerasDialog(_SettingsDialog):
         note = QLabel('No geoid or vertical-datum conversion is applied automatically. ENU Up is relative to its tangent origin, not absolute elevation.')
         note.setWordWrap(True)
         self.aform.addRow(note)
+        if model is not None:
+            memory = QLabel()
+            memory.setWordWrap(True)
+            self.aform.addRow(memory)
+            update = QTimer(self)
+            update.setSingleShot(True)
+            update.setInterval(200)
+
+            def estimate():
+                from .georef import bundle_memory_status, bundle_workspace_fits
+                from .memguard import GB
+                if not self.bundle.isChecked():
+                    memory.setText("")
+                    return
+                marker_count = sum(len(m.get("projections", {})) for m in getattr(dataset, "markers", ())
+                                   if m.get("enabled", True) and not m.get("disabled")) if self.use_markers.isChecked() else 0
+                settings = self.settings()
+                preset = settings["intrinsics"] if settings["fit_intrinsics"] else "none"
+                needed, free, observations = bundle_memory_status(model, self.ties.value(), marker_count, preset)
+                available = f"{free / GB:.2f} GiB available" if free is not None else "available RAM unknown"
+                text = f"Estimated bundle workspace: {needed / GB:.2f} GiB ({available}); up to {observations:,} observations."
+                if not bundle_workspace_fits(needed, free):
+                    text += " Reduce the tie-point limit or fitted calibration parameters to fit available RAM."
+                memory.setText(text)
+
+            update.timeout.connect(estimate)
+            for signal in (self.bundle.toggled, self.intr.toggled, self.use_markers.toggled,
+                           self.ties.valueChanged, self.intrinsic_preset.currentIndexChanged):
+                signal.connect(lambda *_: update.start())
+            estimate()
         self.use_markers.toggled.connect(self._update_control_coordinates)
         self.control_coordinates.currentIndexChanged.connect(self._update_control_coordinates)
         self.bundle.toggled.connect(self._update_control_coordinates)
@@ -596,11 +629,30 @@ class OptimizeCamerasDialog(_SettingsDialog):
     def _update_control_coordinates(self):
         local = self._local_controls()
         self.control_coordinates.setEnabled(self.use_markers.isChecked())
-        self.local_control_note.setVisible(local)
         self.use_cameras.setEnabled(self._photo_gps_enabled and not local)
-        self.reported_accuracy.setEnabled(self.use_cameras.isEnabled() and self.use_cameras.isChecked() and self.bundle.isChecked())
-        self.adjustment_frame.setEnabled(not local)
-        self.intr.setEnabled(self.bundle.isChecked())
+        gps = self.use_cameras.isEnabled() and self.use_cameras.isChecked()
+        controls = self.use_markers.isChecked()
+        bundle = self.bundle.isChecked()
+        crs = self._gcp_crs if controls and self._has_control_coordinates else (
+            self._gps_crs if gps else self._model_crs)
+        note = ""
+        if local:
+            note = ("Fit the existing alignment to the local grid using at least three non-collinear controls. "
+                    "Camera GPS and the previous map origin are excluded from this fit.")
+        elif gps and self._model_is_local and not (controls and self._has_control_coordinates):
+            note = f"Camera GPS will position the model in {self._gps_crs.name}."
+        self.local_control_note.setText(note)
+        self.local_control_note.setVisible(bool(note))
+        enu_supported = (controls or gps) and not local and crs.kind in ("wgs84", "utm")
+        self.adjustment_frame.setEnabled(enu_supported)
+        self.reported_accuracy.setEnabled(gps and bundle)
+        for spin, enabled in ((self.cam_acc, gps and bundle), (self.cam_acc_z, gps and bundle),
+                              (self.mk_acc, controls and bundle), (self.mk_acc_z, controls and bundle),
+                              (self.proj_acc, controls and bundle), (self.tie_acc, bundle)):
+            spin.setEnabled(enabled)
+        self.height_references["camera"].setEnabled(gps)
+        self.height_references["marker"].setEnabled(controls)
+        self.intr.setEnabled(bundle)
         self.intrinsic_preset.setEnabled(self.intr.isEnabled() and self.intr.isChecked())
         self.ties.setEnabled(self.bundle.isChecked())
 
@@ -608,11 +660,12 @@ class OptimizeCamerasDialog(_SettingsDialog):
         local = self._local_controls()
         override = self.use_markers.isChecked() and self.control_coordinates.currentData() == "local"
         return {"use_markers": self.use_markers.isChecked(), "use_cameras": self.use_cameras.isEnabled() and self.use_cameras.isChecked(),
+                "camera_gps_requested": self.use_cameras.isChecked(),
                 "local_control_grid": override or (local and not self._model_is_local),
                 "use_local_override": override,
                 "bundle": self.bundle.isChecked(), "fit_intrinsics": self.intr.isEnabled() and self.intr.isChecked(),
                 "tie_points": self.ties.value(),
-                "adjustment_frame": "projected" if local else self.adjustment_frame.currentData(),
+                "adjustment_frame": self.adjustment_frame.currentData() if self.adjustment_frame.isEnabled() else "projected",
                 "intrinsics": 'all' if self.intrinsic_preset.currentText() == 'All supported coefficients' else self.intrinsic_preset.currentText(),
                 "reported_gps_accuracy": self.reported_accuracy.isEnabled() and self.reported_accuracy.isChecked() and self.use_cameras.isChecked(),
                 "camera_height_reference": self.height_references['camera'].currentData(),

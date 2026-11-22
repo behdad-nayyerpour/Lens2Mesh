@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +12,19 @@ from photomesh import colmap_io as cio
 from photomesh import georef as g
 from test_markers_manual import _scene, _marker
 from test_dense_mesh_gcp import synthetic_model
+
+
+def prepare_test_optimize_exports(stage):
+    """Supply the engine export files in tests that run just the Python stage."""
+    from photomesh.plyio import save_ply
+
+    model = cio.read_model(str(stage / "sparse" / "0"))
+    lines = []
+    for iid, image in model.images.items():
+        lines.extend((" ".join(map(str, (iid, *image.qvec, *image.tvec, image.camera_id, image.name))), ""))
+    (stage / "sparse_txt" / "images.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (stage / "sparse_txt" / "points3D.txt").write_text("# points\n", encoding="utf-8")
+    save_ply(str(stage / "tie_points.ply"), model.points.xyz)
 
 
 @pytest.mark.parametrize("transition", ["new", "open"])
@@ -172,7 +186,7 @@ def test_optimize_transfers_gps_alignment_to_local_survey_grid(window, tmp_path,
     monkeypatch.setattr(OptimizeCamerasDialog, "exec", choose_local)
     messages, submitted = [], []
     monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[2]))
-    monkeypatch.setattr(window, "_run", lambda *args: submitted.append(args))
+    monkeypatch.setattr(window, "_run", lambda *args, **kwargs: submitted.append(args))
     window.optimize_cameras()
     assert ch.crs == "EPSG:4326" and ch.georef["offset"] == old_offset
     assert ch.markers == original_markers and ch.reference_settings == old_reference_settings
@@ -189,6 +203,7 @@ def test_optimize_transfers_gps_alignment_to_local_survey_grid(window, tmp_path,
     assert result["crs_kind"] == "local"
     assert result["control_rmse"]["total"] < 1e-5
     assert result["offset"] == [26100.0, 22100.0, 1400.0]
+    prepare_test_optimize_exports(Path(cfg["stage"]))
     monkeypatch.setattr(window, "_reload_alignment", lambda *_: None)
     submitted[0][2]()
     assert g.CRS.parse(ch.crs).kind == "local" and ch.georef["offset"] == result["offset"]

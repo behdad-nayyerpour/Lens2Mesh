@@ -3,6 +3,49 @@ import numpy as np
 
 
 ITERATIVE_CAMERA_LIMIT = 3000
+BUNDLE_OBSERVATION_BATCH = 32768
+
+
+def bundle_workspace_bytes(observations, points, camera_parameters, fitted_parameters):
+    """Conservative workspace estimate, including sparse duplicates and solver scratch."""
+    width = 6 + fitted_parameters
+    entries = observations * width * 3
+    return (observations * (512 + 32 * width) + entries * 64 + points * 600
+            + min(observations, BUNDLE_OBSERVATION_BATCH) * width ** 2 * 24
+            + camera_parameters * (256 if camera_parameters >= ITERATIVE_CAMERA_LIMIT
+                                    else 32 * camera_parameters))
+
+
+def bundle_normal_blocks(A, B, residuals, columns, points, n_cam, n_points, log=None):
+    """Assemble the same normal equations in bounded observation batches."""
+    import time
+    from scipy import sparse as sp
+
+    width = columns.shape[1]
+    U = sp.csr_matrix((n_cam, n_cam))
+    W = sp.csr_matrix((n_cam, 3 * n_points))
+    V = np.zeros((n_points, 3, 3))
+    gc, gp = np.zeros(n_cam), np.zeros((n_points, 3))
+    last_update = time.monotonic()
+    for start in range(0, len(points), BUNDLE_OBSERVATION_BATCH):
+        end = min(start + BUNDLE_OBSERVATION_BATCH, len(points))
+        a, b, r = A[start:end], B[start:end], residuals[start:end]
+        c, p = columns[start:end], points[start:end]
+        AtA = np.einsum("nki,nkj->nij", a, a)
+        U += sp.coo_matrix((AtA.ravel(), (np.repeat(c, width, 1).ravel(), np.tile(c, (1, width)).ravel())),
+                           shape=U.shape).tocsr()
+        np.add.at(gc, c.ravel(), -np.einsum("nki,nk->ni", a, r).ravel())
+        np.add.at(V, p, np.einsum("nki,nkj->nij", b, b))
+        np.add.at(gp, p, -np.einsum("nki,nk->ni", b, r))
+        AtB = np.einsum("nki,nkj->nij", a, b)
+        W += sp.csr_matrix((AtB.ravel(), (np.repeat(c, 3, 1).ravel(),
+                           (3 * p[:, None, None] + np.arange(3)[None, None, :]).repeat(width, 1).ravel())),
+                           shape=W.shape)
+        now = time.monotonic()
+        if log is not None and now - last_update >= 5:
+            log(f"  Normal equations: {end:,} / {len(points):,} observations assembled.")
+            last_update = now
+    return U, V, W, gc, gp
 
 
 def solve_camera_schur(camera, coupling_scaled, coupling_transpose, rhs, log=print):

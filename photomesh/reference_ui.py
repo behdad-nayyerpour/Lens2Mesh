@@ -18,7 +18,7 @@ from .alignment_reference import gcp_crs, gcp_frame_matches_model, model_crs
 GEOREF_STALE = "built before the last georeferencing (Optimize Cameras)"
 
 
-def products_after_georef(ch, M, log=print):
+def products_after_georef(ch, M, log=print, *, persist_texture=True):
     """Optimize Cameras moved the model, point cloud and mesh into a new frame by
     the similarity M (4x4). Lengths the texture measured in the old frame are
     scaled (else e.g. Build Orthomosaic defaults to a pixel size in the old
@@ -36,7 +36,7 @@ def products_after_georef(ch, M, log=print):
         from .workflow import file_stamp
         t["mesh_stamp"] = file_stamp(ch.model_ply)
         path = os.path.join(t.get("dir") or "", "info.json")
-        if os.path.isfile(path):
+        if persist_texture and os.path.isfile(path):
             try:
                 with open(path,encoding="utf-8") as fh: info=json.load(fh)
                 info["mesh_stamp"] = t["mesh_stamp"]
@@ -49,7 +49,7 @@ def products_after_georef(ch, M, log=print):
             if t.get(k):
                 t[k] = float(t[k]) * s
         p = os.path.join(t.get("dir") or "", "info.json")
-        if t.get("dir") and os.path.exists(p):
+        if persist_texture and t.get("dir") and os.path.exists(p):
             try:
                 with open(p, encoding="utf-8") as f:
                     info = json.load(f)
@@ -351,32 +351,50 @@ class ReferenceMixin:
     def optimize_cameras(self):
         if not self._require_saved("Optimize Cameras"):
             return None
+        from copy import deepcopy
+        from pathlib import Path
+        import tempfile
         from .dialogs import OptimizeCamerasDialog
+        from .alignment_reference import GEOREF_FIELDS, gps_output_crs
+        from .workflow import publish_outputs
         ch = self.dataset
         if not ch.aligned_count() or not os.path.isdir(self._model_dir()):
             QMessageBox.information(self, "Optimize Cameras", "Align photos first."); return
         self._photo_map(ch)  # recover legacy aliases; ambiguous inputs remain excluded
         from .photonames import photo_dimensions
         try:
-            g.validate_projection_dimensions(self._sparse_model(), photo_dimensions(ch))
-        except ValueError as error:
+            model = self._sparse_model()
+            if model is None or not model.images:
+                raise ValueError("The saved alignment is missing or has no cameras. Align photos first.")
+            sizes = photo_dimensions(ch)
+            g.validate_projection_dimensions(model, sizes)
+        except (OSError, ValueError, EOFError, KeyError) as error:
             QMessageBox.information(self, "Optimize Cameras", str(error)); return
         defaults = dict(ch.reference_settings)
         from .photo_gps import camera_gps, use_photo_gps
         defaults.setdefault("use_cameras", bool(camera_gps(ch)))
-        dlg = OptimizeCamerasDialog(self, defaults)
+        try:
+            dlg = OptimizeCamerasDialog(self, defaults, model=model)
+        except (TypeError, ValueError) as error:
+            QMessageBox.warning(self, "Optimize Cameras", str(error))
+            return
         if not dlg.exec():
             return
         s = dlg.settings()
         local_control_grid = s["local_control_grid"]
-        target_crs = model_crs(ch)
+        original_crs = model_crs(ch)
+        target_crs = original_crs
+        control_target = s["use_markers"] and any(point.get("ref") is not None for point in ch.markers)
         if s.get("use_local_override", local_control_grid):
             target_crs = g.CRS.parse("LOCAL").name
-        elif s["use_markers"] and any(point.get("ref") is not None for point in ch.markers):
+        elif control_target:
             target_crs = gcp_crs(ch)
-        frame_changed = g.CRS.parse(model_crs(ch)) != g.CRS.parse(target_crs)
+        elif s["use_cameras"]:
+            target_crs = gps_output_crs(ch)
+        crs = g.CRS.parse(target_crs)
+        frame_changed = g.CRS.parse(original_crs) != crs
         gps_on = use_photo_gps(ch)
-        requested_cameras = s["use_cameras"] if gps_on else ch.reference_settings.get("use_cameras", True)
+        requested_cameras = s.get("camera_gps_requested", s["use_cameras"]) if gps_on else ch.reference_settings.get("use_cameras", True)
         s["use_cameras"] = gps_on and s["use_cameras"]
         reference_settings = dict(s["accuracies"], use_cameras=requested_cameras,
                                   use_photo_gps=gps_on, use_markers=s["use_markers"],
@@ -386,7 +404,7 @@ class ReferenceMixin:
                                   intrinsics=s.get("intrinsics", "f,cx,cy,k1-k3,p1,p2"))
         from .photo_gps import camera_accuracies
         wd = self.project.default_workdir(ch)
-        cfg = {"model": self._model_dir(), "photo_sizes": photo_dimensions(ch),
+        cfg = {"model": self._model_dir(), "photo_sizes": sizes,
                "markers": ch.markers or [], "crs": target_crs,
                "use_markers": s["use_markers"], "use_cameras": s["use_cameras"],
                "camera_gps": camera_gps(ch) if s["use_cameras"] else {},
@@ -398,30 +416,25 @@ class ReferenceMixin:
                "adjustment_frame": s.get('adjustment_frame', 'projected'),
                "coordinate_frame": (ch.georef or {}).get('coordinate_frame'),
                "camera_height_reference": s.get('camera_height_reference', 'unknown'),
-               "marker_height_reference": s.get('marker_height_reference', 'unknown'),
-               "report": os.path.join(wd, "georef_report.txt"),
-               "result": os.path.join(wd, "georef.json"),
-               "transform_files": [p for p in (ch.point_cloud_ply, ch.model_ply,
-                                              os.path.join(wd, "dense", "fused.ply")) if p]}
+               "marker_height_reference": s.get('marker_height_reference', 'unknown')}
         if local_control_grid or frame_changed or bool(cfg['coordinate_frame']) != (cfg['adjustment_frame'] == 'enu'):
             cfg['offset'] = None
             cfg['coordinate_frame'] = None
-        if not cfg["crs"] and cfg["camera_gps"] and s["use_cameras"]:
-            cfg["crs"] = "EPSG:4326"
-        cfg["compare_marker_xyz"] = (s["use_markers"] or g.CRS.parse(gcp_crs(ch)) == g.CRS.parse(cfg["crs"]))
+        cfg["compare_marker_xyz"] = s["use_markers"] or g.CRS.parse(gcp_crs(ch)) == crs
         try:
-            status = g.reference_status(self._sparse_model(), self._marker_objs() if s["use_markers"] else [],
-                                        g.CRS.parse(cfg["crs"]), cfg["camera_gps"])
-        except (TypeError, ValueError) as error:
+            status = g.reference_status(model, self._marker_objs() if s["use_markers"] else [],
+                                        crs, cfg["camera_gps"], detailed=True)
+            if status["source"]:
+                g.validate_adjustment_references(cfg, crs, status["source"], status["usable"], status["gps"])
+        except (TypeError, ValueError, np.linalg.LinAlgError) as error:
             QMessageBox.warning(self, "Optimize Cameras", str(error))
             return
         status["imported"] = len(ch.markers or [])
-        if s["use_markers"] and frame_changed and status["usable"] < 3 and not local_control_grid:
+        if control_target and frame_changed and status["source"] != "GCPs" and not local_control_grid:
             QMessageBox.information(self, "Optimize Cameras",
                 f"Only {status['usable']} usable GCPs. At least three non-collinear GCPs are needed to change the model CRS.")
             return
-        ready = ((s["use_markers"] and status["usable"] >= 3) or
-                 (s["use_cameras"] and status["gps"] >= 3))
+        ready = status["source"] is not None and (not local_control_grid or status["source"] == "GCPs")
         if not ready:
             if local_control_grid:
                 QMessageBox.information(self, "Local survey grid",
@@ -444,32 +457,65 @@ class ReferenceMixin:
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
             cfg["local_only"] = True
+            cfg["crs"] = original_crs
+            cfg["offset"] = (ch.georef or {}).get("offset")
+
+        staging = tempfile.TemporaryDirectory(prefix=".optimize-", dir=wd)
+        stage = Path(staging.name)
+        (stage / "sparse_txt").mkdir()
+        cfg.update(stage=str(stage), report=str(stage / "georef_report.txt"), result=str(stage / "georef.json"))
+        replacements, copies = {}, {}
+        geometry_target = Path(wd) / ("adjusted-geometry-" + stage.name.removeprefix(".optimize-"))
+        if not cfg.get("local_only"):
+            for key, name in (("point_cloud_ply", "cloud.ply"), ("model_ply", "mesh.ply")):
+                value = getattr(ch, key)
+                if value and os.path.isfile(value):
+                    source = os.path.normcase(os.path.realpath(value))
+                    staged = copies.setdefault(source, str(stage / "geometry" / name))
+                    replacements[key] = str(geometry_target / Path(staged).name)
+        if copies:
+            (stage / "geometry").mkdir()
+        cfg["transform_copies"] = copies
+        fused = Path(wd) / "dense" / "fused.ply"
+        staged_fused = stage / "managed-fused.ply"
+        if (not cfg.get("local_only") and fused.is_file() and not fused.is_symlink()
+                and fused.resolve().is_relative_to(Path(wd).resolve())
+                and os.path.normcase(os.path.realpath(fused)) not in copies
+                and Path(str(fused) + ".vis").is_file()):
+            copies[os.path.normcase(os.path.realpath(fused))] = str(staged_fused)
         path = os.path.join(wd, "georef_task.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, default=float)
         title = "Optimizing cameras (local bundle adjustment)" if cfg.get("local_only") else "Optimizing cameras (georeferencing)"
         steps = [(title, [cm.PYTHON, "georef", path], 85)] + \
-            self._export_sparse_steps(wd)
+            self._export_sparse_steps(str(stage))
+        result = {}
 
-        def loaded():
-            res = json.load(open(cfg["result"], encoding="utf-8"))
+        def activate(res):
+            old_frame = ch.georef or {}
+            for key, new_path in replacements.items():
+                setattr(ch, key, new_path)
             if not s["use_cameras"] or not s["bundle"]:
                 reference_settings.pop("reported_gps_accuracy", None)
             ch.reference_settings.update(reference_settings)
             if res.get("similarity") is not None:
-                products_after_georef(ch, res["similarity"], self.log)
-            self._invalidate_camera_products(ch)
+                products_after_georef(ch, res["similarity"], self.log, persist_texture=False)
             if not res.get("local_only"):
-                from .alignment_reference import GEOREF_FIELDS
-                if s["use_markers"] and status["usable"] >= 3:
+                if s["use_markers"] and (status["source"] == "GCPs" or
+                                         (s["bundle"] and status["usable"])):
                     ch.reference_settings["gcp_crs"] = target_crs
                 elif ch.markers:
-                    ch.reference_settings.setdefault("gcp_crs", gcp_crs(ch))
+                    ch.reference_settings.setdefault("gcp_crs", original_crs or "LOCAL")
                 ch.georef = {k: res.get(k) for k in GEOREF_FIELDS}
                 ch.crs = res.get("crs") or ch.crs
                 for r in ch.georef.get("rows") or []:
                     r["pix"] = ((res.get("markers") or {}).get(r["label"]) or {}).get("pix")
                     r["n"] = ((res.get("markers") or {}).get(r["label"]) or {}).get("n")
+                if ch.shapes and (frame_changed or local_control_grid or not old_frame
+                                  or old_frame.get("coordinate_frame") != res.get("coordinate_frame")
+                                  or old_frame.get("zone") != res.get("zone")):
+                    ch.shapes["stale_frame"] = "These shapes use the previous project frame. Reimport them in the current coordinates."
+                    self.log(ch.shapes["stale_frame"])
             else:
                 # Existing CRS/offset still describe the same frame, but old errors no longer apply.
                 if ch.georef:
@@ -483,25 +529,62 @@ class ReferenceMixin:
                 e = (res.get("markers") or {}).get(m.label, {})
                 m.est = e.get("est")
             ch.markers = [m.to_dict() for m in ms]
+            self._invalidate_camera_products(ch)
             self._reload_alignment(ch, wd)
             if res.get("local_only") and ch.georef:
                 self._commit_markers(self._marker_objs())
             c, k = res.get("control_rmse"), res.get("check_rmse")
             msg = ("Cameras optimized in the existing frame. " if res.get("local_only") else "Georeferenced. ") + (f"Control RMSE {c['total']:.3f} m (n={c['n']}). " if c else "") + \
                 (f"Check RMSE {k['total']:.3f} m (n={k['n']})." if k else "")
-            self.log(msg if res.get("local_only") else msg + f" Report: {cfg['report']}")
+            self.log(msg + f" Report: {os.path.join(wd, 'georef_report.txt')}")
             self.statusBar().showMessage(msg, 15000)
+
+        def loaded():
+            try:
+                with open(cfg["result"], encoding="utf-8") as f:
+                    res = json.load(f)
+                camera_list = stage / "sparse_txt" / "images.txt"
+                if not camera_list.is_file() or not cm.read_images_txt(str(camera_list)):
+                    raise ValueError("The newly exported camera list is empty or missing.")
+                if not (stage / "sparse_txt" / "points3D.txt").is_file():
+                    raise ValueError("The newly exported tie-point list is missing.")
+                from .plyio import ply_counts
+                ply_counts(str(stage / "tie_points.ply"))
+                pairs = [
+                    (stage / "sparse" / "0", cfg["model"]),
+                    (stage / "sparse_txt", Path(wd) / "sparse_txt"),
+                    (stage / "tie_points.ply", Path(wd) / "tie_points.ply"),
+                    (Path(cfg["report"]), Path(wd) / "georef_report.txt"),
+                    (Path(cfg["result"]), Path(wd) / "georef.json"),
+                ]
+                if replacements:
+                    pairs.append((stage / "geometry", geometry_target))
+                if staged_fused.is_file():
+                    pairs.append((staged_fused, fused))
+                snapshot = deepcopy(ch.__dict__)
+                was_modified = self.project.modified
+                try:
+                    publish_outputs(pairs, activate=lambda: activate(res))
+                except Exception:
+                    ch.__dict__.update(snapshot)
+                    self.project.modified = was_modified
+                    self.reload_view()
+                    raise
+                result.update(res)
+            finally:
+                staging.cleanup()
+
         def meta(dt, stages):
             from . import procmeta
-            res = json.load(open(cfg["result"], encoding="utf-8"))
+            res = result
             procmeta.record(ch, "camera_optimization" if cfg.get("local_only") else "georeference", params={k: cfg[k] for k in ("crs", "use_markers", "use_cameras",
                                                                              "accuracies", "bundle", "tie_points",
                                                                              "fit_intrinsics")},
                             seconds=dt, stages=stages, control_rmse=res.get("control_rmse"),
                             check_rmse=res.get("check_rmse"), bundle=res.get("bundle"),
-                            transformed=[] if cfg.get("local_only") else cfg["transform_files"])
+                            transformed=list(replacements.values()))
             ch.meta.pop("sparse_stats", None)
-        self._run("Optimize Cameras", steps, loaded, meta)
+        self._run("Optimize Cameras", steps, loaded, meta, on_fail=staging.cleanup, params=s)
 
     def _invalidate_camera_products(self, ch):
         """Camera refinement invalidates camera-derived products, not imported rasters."""

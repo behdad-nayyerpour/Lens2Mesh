@@ -252,7 +252,7 @@ def test_change_gcp_system_updates_validation_diagnostics_and_processing(window,
     assert not dialog.gps_frame.isEnabled()
     monkeypatch.setattr(OptimizeCamerasDialog, "exec", lambda _: True)
     calls = []
-    monkeypatch.setattr(window, "_run", lambda *args: calls.append(args))
+    monkeypatch.setattr(window, "_run", lambda *args, **kwargs: calls.append(args))
     window.optimize_cameras()
     assert len(calls) == 1
     cfg = json.loads((Path(ch.workdir) / "georef_task.json").read_text(encoding="utf-8"))

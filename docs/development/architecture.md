@@ -12,6 +12,7 @@
 | Features | SIFT is the default and supports the extra guided matching pass. SIFT + LightGlue and ALIKED + LightGlue use verified local models, require 1–4096 features per image and skip the extra guided pass, including on resume. ALIKED extraction has a 2048-pixel maximum long edge. |
 | Mapping | Prefer the integrated global mapper when supported and appropriate; retain incremental and compatible legacy-engine fallbacks. Hierarchical mapping remains selectable. |
 | Coarse-to-fine | A SIFT route. Reuse coarse poses only with reliable focal priors; otherwise map at target resolution. Preserve calibration, the project frame and transactional activation. |
+| Camera optimization | Resolve the effective survey references, check geometry and height compatibility, and estimate bundle workspace from observations and fitted lens parameters. Build the same sparse normal equations in observation batches. Stage the model, exports, geometry and diagnostics before publishing the complete set. |
 | Resources | Bound worker counts and large allocations by measured resources. Unknown RAM stops large-allocation planning rather than inventing a safe budget. |
 | Publication | Build new generations first, validate them, then activate complete product sets. Retain old results on failure/cancellation and invalidate derived products when their inputs change. |
 | Device policy | Probe compatible device/driver execution in child processes. GPU feature failure can retry on CPU; dense depth maps still require compatible NVIDIA/CUDA hardware. |
@@ -21,6 +22,11 @@ See [engine policy and native tests](engine-modernization-102.md),
 [release review](release-review-103.md) for implementation details and evidence.
 Benchmarks measure their stated inputs/settings; they do not guarantee timing or
 survey accuracy for another dataset.
+
+Optimize Cameras writes project-owned transformed copies of displayed point
+clouds and meshes. Original imported files remain available at their original
+paths. Imported shapes stored in a superseded coordinate frame are retained
+and hidden from display and export until reimported with a verified reference.
 
 ## Historical measurements
 
