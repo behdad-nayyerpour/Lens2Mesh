@@ -36,6 +36,17 @@ def gcp_frame_matches_model(dataset):
     return g.CRS.parse(gcp_crs(dataset)) == g.CRS.parse(model_crs(dataset))
 
 
+def gps_output_crs(dataset):
+    """GPS-only alignment can publish a new geographic frame over a local one."""
+    current = model_crs(dataset) if dataset is not None else ""
+    try:
+        if current and g.CRS.parse(current).kind != "local":
+            return current
+    except ValueError:
+        pass
+    return "EPSG:4326"
+
+
 def control_availability(dataset, crs_text=None):
     """Check source observations even when there is no aligned model yet."""
     if dataset is None:
@@ -64,24 +75,30 @@ def control_availability(dataset, crs_text=None):
                    "At least three non-collinear GCPs are required.")
 
 
-def alignment_reference_config(dataset, settings, mapping, workdir):
-    """Snapshot the explicit reference choices for the georeference worker."""
+def alignment_reference_frame(dataset, settings):
+    """Resolve and validate explicitly selected references before starting work."""
     use_gps = bool(settings.get("gps_frame"))
     use_gcps = bool(settings.get("use_gcps"))
     if not (use_gps or use_gcps):
         return None
     reference = dataset.reference_settings
-    selected_crs = (settings.get("gcp_crs") or gcp_crs(dataset)) if use_gcps else None
+    selected_crs = (settings.get("gcp_crs") or gcp_crs(dataset)) if use_gcps else gps_output_crs(dataset)
+    crs = g.CRS.parse(selected_crs)
+    if use_gps and crs.kind == "local":
+        raise ValueError("Photo GPS and local GCP coordinates need a known transformation to a shared CRS. "
+                         "Choose GPS only, choose GCPs only, or supply GCP coordinates in a geographic/projected CRS.")
     existing_frame = dataset.georef or {}
-    if selected_crs and g.CRS.parse(selected_crs) != g.CRS.parse(model_crs(dataset)):
+    try:
+        same_crs = crs == g.CRS.parse(model_crs(dataset))
+    except ValueError:
+        same_crs = False
+    if not same_crs:
         existing_frame = {}
-    camera_height = reference.get("camera_height_reference", existing_frame.get("camera_height_reference") or "unknown")
-    gcp_height = reference.get("marker_height_reference", existing_frame.get("marker_height_reference") or "unknown")
+    stored_frame = dataset.georef or {}
+    camera_height = reference.get("camera_height_reference", stored_frame.get("camera_height_reference") or "unknown")
+    gcp_height = reference.get("marker_height_reference", stored_frame.get("marker_height_reference") or "unknown")
     if use_gps and use_gcps and settings.get("common_height_reference"):
         camera_height = gcp_height = settings["common_height_reference"]
-    crs = g.CRS.parse(selected_crs or model_crs(dataset) or "EPSG:4326")
-    if use_gps and crs.kind == "local":
-        raise ValueError("Camera GPS requires a geographic/projected CRS. For a local grid, use only GCPs.")
     if use_gcps:
         ready, reason = control_availability(dataset, selected_crs)
         if not ready:
@@ -89,11 +106,22 @@ def alignment_reference_config(dataset, settings, mapping, workdir):
         if use_gps and (camera_height != gcp_height or camera_height == "unknown"):
             raise ValueError("To combine photo GPS and GCPs, confirm their common height reference in Align Photos. "
                              "You can also run alignment with just one reference source.")
+    return selected_crs, existing_frame, camera_height, gcp_height
+
+
+def alignment_reference_config(dataset, settings, mapping, workdir):
+    """Snapshot the explicit reference choices for the georeference worker."""
+    frame = alignment_reference_frame(dataset, settings)
+    if frame is None:
+        return None
+    selected_crs, existing_frame, camera_height, gcp_height = frame
+    use_gps = bool(settings.get("gps_frame"))
+    use_gcps = bool(settings.get("use_gcps"))
     priors = use_gps and (use_gcps or settings.get("gps_priors"))
     return {
         "model": os.path.join(workdir, "sparse", "0"),
         "markers": deepcopy(dataset.markers) if use_gcps else [],
-        "crs": selected_crs or model_crs(dataset) or "EPSG:4326",
+        "crs": selected_crs,
         "use_markers": use_gcps,
         "use_cameras": use_gps,
         "require_gcps": use_gcps,
@@ -101,7 +129,7 @@ def alignment_reference_config(dataset, settings, mapping, workdir):
         "camera_gps": camera_gps(dataset, mapping) if use_gps else {},
         "camera_accuracies": camera_accuracies(dataset, mapping,
                                                 reported=settings.get("reported_gps_accuracy", False)) if priors else {},
-        "accuracies": {key: reference.get(key, default) for key, default in g.DEFAULTS.items()},
+        "accuracies": {key: dataset.reference_settings.get(key, default) for key, default in g.DEFAULTS.items()},
         "camera_height_reference": camera_height,
         "marker_height_reference": gcp_height,
         "strict_heights": use_gcps,

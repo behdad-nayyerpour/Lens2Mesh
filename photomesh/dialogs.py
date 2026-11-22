@@ -157,15 +157,13 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_frame = QCheckBox("Use photo GPS to locate, scale and orient the model")
         cameras = getattr(dataset, "cameras", [])
         from .engine import gps_frame_available
-        from .alignment_reference import HEIGHT_REFERENCES, control_availability, gcp_crs, model_crs
+        from .alignment_reference import HEIGHT_REFERENCES, control_availability, gcp_crs, gps_output_crs
         from .georef import CRS
         existing = bool(dataset and (dataset.georef or dataset.aligned_count()))
-        project_crs = model_crs(dataset) if dataset is not None else ""
-        ready, reason = gps_frame_available(cameras, project_crs, respect_legacy_flags=False)
-        self._gps_frame_tooltip = reason if self.photo_gps_on else "Photo GPS is disabled in Settings."
+        ready, reason = gps_frame_available(cameras, respect_legacy_flags=False)
         self.gps_frame.setChecked(ready and self.photo_gps_on and not existing)
         self.gps_frame.setEnabled(ready and self.photo_gps_on)
-        self.gps_frame.setToolTip(self._gps_frame_tooltip)
+        self.gps_frame.setToolTip(reason if self.photo_gps_on else "Photo GPS is disabled in Settings.")
         self.gform.addRow(self.gps_frame)
         self.use_gcps = QCheckBox("Use ground control points to locate, scale and orient the model")
         gcp_ready, gcp_reason = control_availability(dataset)
@@ -184,6 +182,10 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gform.addRow(self.use_gcps)
         coordinates_label = QLabel("GCP coordinate system:")
         self.gform.addRow(coordinates_label, self.gcp_coordinates)
+        self.reference_note = QLabel()
+        self.reference_note.setWordWrap(True)
+        self.gform.addRow(self.reference_note)
+        gps_target = CRS.parse(gps_output_crs(dataset)).name
         self.common_heights = QComboBox()
         for label, value in HEIGHT_REFERENCES:
             self.common_heights.addItem(label, value)
@@ -198,24 +200,27 @@ class AlignPhotosDialog(_SettingsDialog):
         self.gps_priors = QCheckBox("Also constrain individual camera positions with GPS")
         self.gps_priors.setToolTip("Optional with GPS alone. When GPS and GCPs are selected, the adjustment uses both.")
         def update_reference_controls():
-            selected_crs = self.gcp_coordinates.currentData()
             using_gcps = self.use_gcps.isEnabled() and self.use_gcps.isChecked()
-            local = using_gcps and CRS.parse(selected_crs).kind == "local"
-            if using_gcps:
-                gps_ready, tooltip = gps_frame_available(cameras, selected_crs, respect_legacy_flags=False)
-            else:
-                gps_ready, tooltip = ready, self._gps_frame_tooltip
-            self.gps_frame.setEnabled(self.photo_gps_on and gps_ready)
-            self.gps_frame.setToolTip(tooltip if self.photo_gps_on else self._gps_frame_tooltip)
-            combined = self.gps_frame.isEnabled() and self.gps_frame.isChecked() and using_gcps
+            using_gps = self.gps_frame.isEnabled() and self.gps_frame.isChecked()
+            local = using_gcps and CRS.parse(self.gcp_coordinates.currentData()).kind == "local"
+            combined = using_gps and using_gcps
             show_coordinates = self.use_gcps.isChecked() and self.gcp_coordinates.count() > 1
             coordinates_label.setVisible(show_coordinates)
             self.gcp_coordinates.setVisible(show_coordinates)
-            height_label.setVisible(combined)
-            self.common_heights.setVisible(combined)
-            self.gps_priors.setEnabled(self.gps_frame.isEnabled() and self.gps_frame.isChecked() and not using_gcps)
+            height_label.setVisible(combined and not local)
+            self.common_heights.setVisible(combined and not local)
+            self.gps_priors.setEnabled(using_gps and not using_gcps)
             self.reported_accuracy.setEnabled(self.photo_gps_on and not local and
                                               (combined or (self.gps_priors.isEnabled() and self.gps_priors.isChecked())))
+            if combined and local:
+                note = ("Photo GPS and the local GCP grid need a known transformation before they can be combined. "
+                        "Choose one reference, or supply GCP coordinates in a geographic/projected system.")
+            elif using_gps and not using_gcps:
+                note = f"GPS output coordinates: {gps_target}"
+            else:
+                note = ""
+            self.reference_note.setText(note)
+            self.reference_note.setVisible(bool(note))
         self.gps_frame.toggled.connect(update_reference_controls)
         self.use_gcps.toggled.connect(update_reference_controls)
         self.gcp_coordinates.currentIndexChanged.connect(update_reference_controls)
@@ -282,21 +287,29 @@ class AlignPhotosDialog(_SettingsDialog):
         if self.frameGeometry().bottom() > available.bottom():
             self.move(self.x(), max(available.top(), self.y() - (self.frameGeometry().bottom() - available.bottom())))
 
-    def settings(self):
-        QSettings().setValue('align/camera_model', self.camera_model.currentData())
+    def _reference_options(self):
         gps = self.gps_frame.isEnabled() and self.gps_frame.isChecked()
         gcps = self.use_gcps.isEnabled() and self.use_gcps.isChecked()
+        return {"gps_frame": gps, "use_gcps": gcps,
+                "gcp_crs": self.gcp_coordinates.currentData() if gcps else None,
+                "common_height_reference": self.common_heights.currentData() if gps and gcps else None,
+                "gps_priors": self.gps_priors.isEnabled() and self.gps_priors.isChecked(),
+                "reported_gps_accuracy": self.reported_accuracy.isEnabled() and self.reported_accuracy.isChecked()}
+
+    def validate_settings(self):
+        from .alignment_reference import alignment_reference_frame
+        dataset = getattr(self.parent(), "dataset", None)
+        if dataset is not None:
+            alignment_reference_frame(dataset, self._reference_options())
+
+    def settings(self):
+        QSettings().setValue('align/camera_model', self.camera_model.currentData())
         return {"accuracy": self.accuracy.currentData() or self.accuracy.currentText(),
                 "generic": self.generic.isChecked(),
                 "mode": self.mode.currentText(),
                 "mapper": self.mapper.currentText(),
                 "feature_method": self.feature_method.currentText(),
-                "gps_frame": gps,
-                "use_gcps": gcps,
-                "gcp_crs": self.gcp_coordinates.currentData() if gcps else None,
-                "common_height_reference": self.common_heights.currentData() if gps and gcps else None,
-                "gps_priors": self.gps_priors.isEnabled() and self.gps_priors.isChecked(),
-                "reported_gps_accuracy": self.reported_accuracy.isEnabled() and self.reported_accuracy.isChecked(),
+                **self._reference_options(),
                 "coarse_to_fine": self.c2f.isEnabled() and self.c2f.isChecked(),
                 "reference": self.reference.isEnabled() and self.reference.isChecked(),
                 "key_point_limit": self.key_limit.value(),

@@ -47,10 +47,13 @@ def test_dialog_reference_choices_are_independent_and_use_measurements(window, t
     assert dialog.use_gcps.isEnabled() and not dialog.use_gcps.isChecked()
     dialog.use_gcps.setChecked(True)
     assert not dialog.common_heights.isHidden()
+    with pytest.raises(ValueError, match="common height reference"):
+        dialog.validate_settings()
     dialog.common_heights.setCurrentIndex(dialog.common_heights.findData("ellipsoidal"))
     settings = dialog.settings()
     assert settings["use_gcps"] and settings["gps_frame"]
     assert settings["common_height_reference"] == "ellipsoidal"
+    dialog.validate_settings()
     dialog.gps_frame.setChecked(False)
     assert dialog.settings()["use_gcps"] and not dialog.settings()["gps_frame"]
     assert dialog.common_heights.isHidden()
@@ -59,11 +62,17 @@ def test_dialog_reference_choices_are_independent_and_use_measurements(window, t
     assert not control_availability(ch)[0]
 
 
-@pytest.mark.parametrize("gps,gcps", [(False, False), (True, False), (False, True), (True, True)])
-def test_alignment_applies_only_selected_references_and_publishes_diagnostics(window, tmp_path, monkeypatch, gps, gcps):
+@pytest.mark.parametrize("gps,gcps,local", [(False, False, False), (True, False, False), (False, True, False),
+                                          (True, True, False), (True, False, True)])
+def test_alignment_applies_only_selected_references_and_publishes_diagnostics(window, tmp_path, monkeypatch,
+                                                                            gps, gcps, local):
     from photomesh import colmap, engine
 
     ch, model = _data(window, tmp_path)
+    if local:
+        ch.crs = "LOCAL"
+        ch.georef = {"crs": "LOCAL", "offset": [26000, 22000, 1400]}
+    previous_georef = dict(ch.georef)
     window.project.path = str(tmp_path / "survey.pmsx")
     old_workdir = ch.workdir
     monkeypatch.setattr(window, "_require_saved", lambda _: True)
@@ -85,12 +94,14 @@ def test_alignment_applies_only_selected_references_and_publishes_diagnostics(wi
     def run(_title, steps, loaded, _meta, **kwargs):
         planned = steps[0][1]()
         workdir, = Path(window.project.data_dir).glob("alignment-*")
-        assert ch.workdir == old_workdir and not ch.georef
+        assert ch.workdir == old_workdir and ch.georef == previous_georef
         if gps or gcps:
             labels = [label for label, _, _ in planned]
             assert labels.index("Applying alignment references") < labels.index("Exporting tie points")
             cfg = json.loads((workdir / "alignment_reference.json").read_text(encoding="utf-8"))
             assert cfg["use_markers"] == gcps and cfg["use_cameras"] == gps
+            if local:
+                assert cfg["crs"] == "EPSG:4326" and cfg["offset"] is None
             if gps and gcps:
                 assert cfg["bundle"] and cfg["camera_height_reference"] == "ellipsoidal"
             g.run_task(cfg)
@@ -115,6 +126,28 @@ def test_alignment_applies_only_selected_references_and_publishes_diagnostics(wi
     else:
         assert all(point["est"] is None for point in ch.markers)
     assert bool(ch.georef) == (gps or gcps)
+    if local:
+        assert g.CRS.parse(ch.crs).kind == "wgs84"
+        assert ch.reference_settings["gcp_crs"] == "LOCAL"
+
+
+def test_local_model_allows_both_selections_and_explains_local_gcp_conflict(window, tmp_path):
+    ch, _ = _data(window, tmp_path)
+    ch.crs = "LOCAL"
+    ch.georef = {"crs": "LOCAL", "offset": [26000, 22000, 1400]}
+    dialog = AlignPhotosDialog(window)
+    assert dialog.gps_frame.isEnabled() and dialog.use_gcps.isEnabled()
+    assert not dialog.gps_frame.isChecked()
+    dialog.gps_frame.setChecked(True)
+    assert "WGS 84" in dialog.reference_note.text()
+    dialog.validate_settings()
+    dialog.use_gcps.setChecked(True)
+    assert dialog.settings()["gps_frame"] and dialog.settings()["use_gcps"]
+    assert "known transformation" in dialog.reference_note.text()
+    with pytest.raises(ValueError, match="known transformation"):
+        dialog.validate_settings()
+    dialog.gps_frame.setChecked(False)
+    dialog.validate_settings()
 
 
 def test_alignment_reference_failure_cannot_fall_back_to_gps(window, tmp_path):
