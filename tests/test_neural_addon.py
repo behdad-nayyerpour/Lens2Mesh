@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from photomesh import APP_VERSION
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'packaging'))
 import neural_addon as addon  # noqa: E402
 
@@ -50,10 +52,15 @@ def test_different_existing_runtime_fails_without_overwrite(installation):
     assert target.read_bytes() == b'other version'
 
 
-def test_106_uses_same_authenticated_optional_runtime(installation):
-    root,payload,spec=installation
-    (root/'app/photomesh/__init__.py').write_text('APP_NAME="Lens2Mesh"\nAPP_VERSION="1.0.6"\n')
-    assert addon.make_manifest(root,payload,'c'*40,spec)['files']
+@pytest.mark.parametrize("version", ("1.0.5", "1.0.6", APP_VERSION))
+def test_compatible_versions_use_same_authenticated_optional_runtime(installation, version):
+    root, payload, spec = installation
+    (root / 'app/photomesh/__init__.py').write_text(f'APP_NAME="Lens2Mesh"\nAPP_VERSION="{version}"\n')
+    assert addon.make_manifest(root, payload, 'c' * 40, spec)['files']
+
+
+def test_unsupported_version_rejects_addon(installation):
+    root, payload, spec = installation
     (root/'app/photomesh/__init__.py').write_text('APP_NAME="Lens2Mesh"\nAPP_VERSION="9.9.9"\n')
     with pytest.raises(ValueError,match='existing Lens2Mesh'):
         addon.make_manifest(root,payload,'c'*40,spec)
