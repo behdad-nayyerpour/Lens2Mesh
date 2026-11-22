@@ -8,6 +8,8 @@ import sys
 
 import apply_patch as updater
 
+SUPPORTED_BASE_VERSIONS = ('1.0.5', '1.0.6', '1.0.7')
+
 
 def addon_files(specification):
     names = set()
@@ -36,8 +38,9 @@ def make_manifest(root, payload, revision, specification):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     values[target.id] = node.value.value
-    if values.get('APP_NAME') != 'Lens2Mesh' or values.get('APP_VERSION') not in ('1.0.5', '1.0.6'):
-        raise ValueError('Select the existing Lens2Mesh 1.0.5 or 1.0.6 installation folder')
+    if values.get('APP_NAME') != 'Lens2Mesh' or values.get('APP_VERSION') not in SUPPORTED_BASE_VERSIONS:
+        supported = ', '.join(SUPPORTED_BASE_VERSIONS)
+        raise ValueError(f'Select an existing Lens2Mesh installation running {supported}')
     identity = updater.managed(root, 'app/runtime.id')
     runtime_id = identity.read_text(encoding='utf-8').strip()
     if len(runtime_id) != 64 or any(c not in '0123456789abcdef' for c in runtime_id):
