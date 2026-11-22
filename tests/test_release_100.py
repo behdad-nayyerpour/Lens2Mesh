@@ -76,7 +76,7 @@ def test_status_has_no_progress_widgets_and_only_ready_busy(window):
     window.busy_indicator.background("tiles")
     assert window.statusBar().currentMessage() == "Ready"
     window._show_resources({"cpu": 20, "gpu": None})
-    assert window.gpu_label.text() == "GPU unavailable"
+    assert window.gpu_label.text() == "GPU usage unavailable"
 
 
 def test_task_panel_has_two_bars_and_unknown_totals(qtbot):
@@ -149,7 +149,7 @@ def test_legacy_multi_dataset_open_never_drops_data(tmp_path):
     assert len(Project.load(path).datasets) == 2
 
 
-def test_workspace_root_is_project_and_markers_share_flag_icons(window):
+def test_workspace_root_is_project_and_reference_tables_are_in_their_docks(window):
     from photomesh import georef as g
     window.dataset.markers = [g.Marker("G1", locked=True).to_dict()]
     window.refresh_all()
@@ -157,9 +157,8 @@ def test_workspace_root_is_project_and_markers_share_flag_icons(window):
     assert root.data(0, Qt.UserRole)[0] == "project"
     assert not any("dataset" == (item.data(0, Qt.UserRole) or [None])[0]
                    for item in window.workspace._iter())
-    assert not window.markers_pane.item(0, 0).icon().isNull()
     assert window.docks["Markers"].isAncestorOf(window.markers_pane)
-    assert window.docks["Cameras"].widget() is window.reference
+    assert window.docks["Cameras"].widget().isAncestorOf(window.reference)
 
 
 def test_native_dialogs_default_and_explicit_fallback(monkeypatch, qapp):
@@ -184,7 +183,7 @@ def test_alignment_settings_only_expose_functional_options(qtbot):
     dialog.reference.setChecked(False)
     assert not dialog.settings()["reference"]
     dialog.mode.setCurrentText("Sequential")
-    assert dialog.settings()["sequential"] and not dialog.reference.isEnabled()
+    assert dialog.settings()["mode"] == "Sequential" and not dialog.reference.isEnabled()
     mesh = BuildModelDialog(); qtbot.addWidget(mesh)
     assert not hasattr(mesh, "surface") and not hasattr(mesh, "vcolors")
     mesh.face_count.setCurrentText("Custom")
@@ -244,10 +243,12 @@ def test_ortho_context_hit_includes_flag_above_ground_point(window):
 
 def test_marker_hit_radius_remains_correct_after_photo_rotation(window, image_dir):
     photo = str(sorted(image_dir.iterdir())[0])
+    from PySide6.QtCore import QPointF
     window.photo_view.open(photo)
     window.photo_view.set_markers([("A", 10., 10., "pinned"), ("B", 500., 400., "placed")])
     window.photo_view.view.rotate(90)
-    assert [m[0] for m in window.photo_view.markers_near(10., 10.)] == ["A"]
+    view = window.photo_view
+    assert view._flag_at(view.view.mapFromScene(QPointF(10., 10.))) == "A"
 
 
 def test_thumbnail_batches_from_previous_project_are_ignored(window, monkeypatch):

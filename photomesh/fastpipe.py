@@ -447,7 +447,8 @@ def camera_groups_step(db, label="Grouping cameras", groups=None):
 
 # COLMAP camera model id -> indices of (x-scaled, y-scaled) params
 _CAM_SCALE = {0: ([0, 1], [2]), 1: ([0, 2], [1, 3]), 2: ([0, 1], [2]), 3: ([0, 1], [2]),
-              4: ([0, 2], [1, 3]), 6: ([0, 2], [1, 3]), 8: ([0, 1], [2]), 9: ([0, 1], [2])}
+              4: ([0, 2], [1, 3]), 5: ([0, 2], [1, 3]), 6: ([0, 2], [1, 3]),
+              8: ([0, 1], [2]), 9: ([0, 1], [2])}
 
 
 def _scale_cameras(con, factors):
@@ -656,6 +657,39 @@ def model_num_images(model_dir):
     return 0
 
 
+def _select_primary_model(out):
+    """Select the largest valid connected reconstruction without dropping alternatives."""
+    import struct
+    from pathlib import Path
+    from uuid import uuid4
+    from .engine import validate_model
+
+    root = Path(out)
+    primary = root / "0"
+    candidates = [path for path in root.glob("*") if path.is_dir() and path.name.isdecimal()]
+    if not candidates or candidates == [primary]:
+        return []
+    ranked = sorted(candidates, key=lambda path: (-model_num_images(path), int(path.name)))
+    for folder in ranked:
+        try:
+            model = validate_model(folder)
+        except (OSError, ValueError, EOFError, IndexError, struct.error):
+            continue
+        if folder == primary:
+            return []
+        former = root / f"alternate-primary-{uuid4().hex[:8]}"
+        if primary.exists():
+            primary.rename(former)
+        try:
+            folder.rename(primary)
+        except OSError:
+            if former.exists():
+                former.rename(primary)
+            raise
+        return [("log", f"Selected reconstruction {folder.name} with {len(model.images)} registered photos.", 0)]
+    return []  # existing validation/fallback handles an unusable mapper result
+
+
 def filter_step(exe, model):
     """Remove tie points with large reprojection error / tiny triangulation
     angle after the final bundle adjustment (as COLMAP's mapper does). This
@@ -730,18 +764,20 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
         os.makedirs(resumed_out,exist_ok=True)
         inc[inc.index('--output_path')+1]=resumed_out
     label = f"Estimating camera locations{tag}"
+    select_primary = ("Selecting primary reconstruction", lambda: _select_primary_model(out), 0)
 
     def fallback():
         import shutil
         shutil.rmtree(out, ignore_errors=True); os.makedirs(out, exist_ok=True)
         return [("log", "falling back to the incremental mapper", 0),
-                (label + " - incremental", inc, 25)]
+                (label + " - incremental", inc, 25), select_primary]
     if kind == "Global":
         from .engine import global_arguments
         integrated = global_arguments(exe, s, db, img_dir, out, coarse=coarse)
         if integrated is not None:
             return [("log", f"Mapper: integrated COLMAP global on {n_images} images", 0),
                     (label + " - global", Try(integrated, fallback), 25),
+                    select_primary,
                     ("Checking global model", _check_model(out, n_images, fallback), 0)]
         # GLOMAP 1.2 reading a COLMAP 3.8 database aborts in its final
         # re-triangulation (frame/rig check, legacy DB has no frames), so that
@@ -755,6 +791,7 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
             g[4:4] = ["--image_path", img_dir]
         steps = [("log", f"Mapper: global (GLOMAP) on {n_images} images", 0),
                  (label + " - global", Try(g, fallback), 25),
+                 select_primary,
                  (f"Checking {tag.strip(' ()') or 'model'}", _check_model(out, n_images, fallback), 0)]
         if not coarse:
             steps.append(("Re-triangulating global model", _retriangulate(exe, db, img_dir, out), 0))
@@ -768,8 +805,10 @@ def mapper_steps(exe, db, img_dir, out, s, n_images, ilist=None, coarse=False, t
         h += opt(exe, "hierarchical_mapper", ["Mapper.ba_global_max_refinements"], 2)
         return [("log", f"Mapper: hierarchical (parallel sub-models) on {n_images} images", 0),
                 (label + " - hierarchical", Try(h, fallback), 25),
+                select_primary,
                 (f"Checking {tag.strip(' ()') or 'model'}", _check_model(out, n_images, fallback), 0)]
-    return [("log", f"Mapper: incremental on {n_images} images", 0), (label + " - incremental", inc, 25)]
+    return [("log", f"Mapper: incremental on {n_images} images", 0),
+            (label + " - incremental", inc, 25), select_primary]
 
 
 def _retriangulate(exe, db, img_dir, out):
@@ -815,22 +854,25 @@ def _check_model(out, n_images, fallback, min_frac=0.5):
 
 
 # ------------------------------------------------------------ step builders
+def uses_coarse_alignment(settings, target_size):
+    return (settings.get("mode", "Fast") == "Fast"
+            and settings.get("feature_method", "SIFT") == "SIFT"
+            and settings.get("coarse_to_fine", True)
+            and target_size > COARSE_MAX_SIZE * 1.25)
+
+
 def fast_align_steps(exe, wd, names, infos, s):
     """Build the Fast pipeline. Steps are (label, args|callable, weight).
 
     A callable step runs in-process and may return a list of steps that is
     inserted right after it (used for decisions that depend on results).
     """
-    from .colmap import opt, ACCURACY_DOWNSCALE
-    from .colmap import image_dir, image_list
+    from .colmap import opt, image_dir, image_list, image_long_edge, alignment_extraction_sizes
     img_dir = image_dir(wd)
     ilist = image_list(wd)
-    maxdim = max([i.get("width", 0) for i in infos] + [i.get("height", 0) for i in infos] + [0]) or 3200
-    fine_size = max(256, maxdim // ACCURACY_DOWNSCALE[s["accuracy"]])
-    from .engine import extraction_size
-    requested_size = fine_size
-    fine_size = extraction_size(fine_size, s)
-    do_fine = s.get("feature_method", "SIFT") == "SIFT" and s.get("coarse_to_fine", True) and fine_size > COARSE_MAX_SIZE * 1.25
+    maxdim = max(map(image_long_edge, infos), default=0)
+    requested_size, fine_size = alignment_extraction_sizes(maxdim, s)
+    do_fine = uses_coarse_alignment(s, fine_size)
     coarse_size = min(COARSE_MAX_SIZE, fine_size)
     cdb, fdb = os.path.join(wd, "coarse.db"), os.path.join(wd, "database.db")
     csparse, sparse = os.path.join(wd, "sparse_coarse"), os.path.join(wd, "sparse")
@@ -840,7 +882,7 @@ def fast_align_steps(exe, wd, names, infos, s):
             os.remove(p)
     os.makedirs(csparse, exist_ok=True); os.makedirs(sparse, exist_ok=True)
 
-    use_cache = s.get("decode_cache", True) and all(i.get("width") and i.get("height") for i in infos)
+    use_cache = s.get("decode_cache", True) and all(map(image_long_edge, infos))
     work_f, work_c = os.path.join(wd, "_work_fine"), os.path.join(wd, "_work_coarse")
     dims = {}
     fine_kp = s["key_point_limit"]
@@ -889,8 +931,6 @@ def fast_align_steps(exe, wd, names, infos, s):
         a = ["matches_importer", "--database_path", db, "--match_list_path", ptxt, "--match_type", "pairs"]
         from .engine import matching_arguments
         a += matching_arguments(exe, "matches_importer", s)
-        if s.get("guided_matching"):
-            a += opt(exe, "matches_importer", ["FeatureMatching.guided_matching", "SiftMatching.guided_matching"], "1")
         from .pair_matching import PairImport
         return PairImport(a, db, ptxt, ilist)
 

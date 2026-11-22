@@ -9,9 +9,9 @@ def test_manual_is_exact_render_reviewed_updated_pdf():
     assert hashlib.sha256(path.read_bytes()).hexdigest() == '83bcd31c0ddea7277227045311f5f74117164d7bf96b8dac933296cae02f9faf'
 
 
-def test_current_manual_has_reviewed_recovery_navigation_update():
+def test_current_manual_matches_the_reviewed_release_pdf():
     path=documentation.RESOURCES/documentation.MANUAL
-    assert path.name=='Lens2Mesh_1.0.6_Complete_User_Manual.pdf'
+    assert path.name=='Lens2Mesh_1.0.7_Complete_User_Manual.pdf'
     assert hashlib.sha256(path.read_bytes()).hexdigest()==documentation.MANUAL_SHA256
 
 

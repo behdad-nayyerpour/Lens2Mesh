@@ -100,7 +100,7 @@ def choose_input(workdir):
     # Coarse-to-fine uses a different feature database. Its camera snapshots
     # must never seed final-resolution tracks, even if they contain more cameras.
     candidates=list((root/'checkpoints'/'sparse').glob('**/images.bin'))
-    if (root/'sparse/0/images.bin').exists():candidates.append(root/'sparse/0/images.bin')
+    candidates.extend(image for image in (root/'sparse').glob('*/images.bin') if image.parent.name.isdecimal())
     ranked=[]
     for image in candidates:
         try:
@@ -122,13 +122,22 @@ def steps(exe,workdir,record,dataset,execution=None):
     root=Path(workdir);settings=dict(record['settings']);planned=[]
     if execution is not None:settings.update(execution)
     if record['phase']=='matching':
+        from .engine import GUIDED_MATCHING_OPTIONS, matching_arguments, supports_guided_matching
         args=list(record['matching_args'])
+        current=[]
+        replace=set()
+        guided_flags={'--' + option for option in GUIDED_MATCHING_OPTIONS}
+        if not supports_guided_matching(settings.get('feature_method','SIFT')):
+            replace.update(guided_flags)
         if execution is not None:
             # Re-probe the device without changing the saved feature method.
             # A resumed laptop may no longer have the original GPU available.
-            from .engine import matching_arguments
             current=matching_arguments(exe,args[0],settings)
-            replace=set(current[::2])|{'--FeatureMatching.gpu_index','--SiftMatching.gpu_index'}
+            replace.update(current[::2])
+            replace.update(('--FeatureMatching.gpu_index','--SiftMatching.gpu_index'))
+            if 'guided_matching' in settings or guided_flags.intersection(current[::2]):
+                replace.update(guided_flags)
+        if replace:
             args=[args[0]]+[part for key,value in zip(args[1::2],args[2::2])
                             if key not in replace for part in (key,value)]+current
         action=(PairImport(args,root/'database.db',record['pairs'],cm.image_list(workdir))
@@ -151,7 +160,7 @@ def steps(exe,workdir,record,dataset,execution=None):
         planned+=mapper_steps(exe,str(root/'database.db'),cm.image_dir(workdir),str(sparse),
                               settings,len([c for c in dataset.cameras if c.enabled]),cm.image_list(workdir))
     else:
-        # GPS task preserves this raw model before transforming its published
+        # Georeferencing preserves this raw model before transforming its
         # working copy. Reuse it to avoid a second transform after interruption.
         backup=root/'sparse/0_original'
         if backup.exists():

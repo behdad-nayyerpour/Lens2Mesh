@@ -20,47 +20,62 @@ def number(lo, hi, value, decimals=2):
 
 
 def alignment_context(d, parent):
+    from .colmap import alignment_extraction_sizes, image_long_edge
+    from .engine import ALIKED_MAX_IMAGE_SIZE
+    from .fastpipe import AUTO_GLOBAL_MIN_IMAGES, COARSE_MAX_SIZE, uses_coarse_alignment
     cameras = [c for c in getattr(getattr(parent, "dataset", None), "cameras", []) if c.enabled]
-    gps = sum(all(v is not None and math.isfinite(v) for v in (c.lon, c.lat, c.alt)) for c in cameras)
-    from .photo_gps import use_photo_gps
-    dataset = getattr(parent, "dataset", None)
-    gps_on = use_photo_gps(dataset) if dataset is not None else True
-    d.reference.setChecked(gps_on and gps >= 2)
-    d.reference.setEnabled(gps_on and gps >= 2)
+    sizes = [image_long_edge(c.info()) for c in cameras]
+    maximum = max(sizes, default=0) if all(sizes) else 0
+    from .georef import valid_gps
+    gps = sum(valid_gps((c.lon, c.lat, c.alt)) is not None for c in cameras)
+    d.reference.setChecked(d.photo_gps_on and gps >= 2)
     d.reference.setToolTip(f"{gps}/{len(cameras)} photos have complete GPS; pair selection only, not georeferencing.")
     d.summary = note(d, "")
     d.single_camera.setToolTip("Groups use compatible model, image size and initial calibration. Poses remain independent.")
-    d.guided.setToolTip("Use pair geometry to search for additional correspondences; adds matching work.")
-    d.accuracy.setToolTip("High = full image; Medium = half dimensions; Low = quarter; Lowest = one eighth.")
+    d.accuracy.setToolTip("Full, Half, Quarter and One eighth scale the longest edge of the photos.")
     def update(*_):
-        from .fastpipe import COARSE_MAX_SIZE
         mode = d.mode.currentText()
-        d.reference.setEnabled(gps_on and mode == "Fast" and gps >= 2)
-        maximum = max([max(c.width, c.height) for c in cameras] or [0])
-        from .colmap import ACCURACY_DOWNSCALE
-        side = max(256, maximum // ACCURACY_DOWNSCALE[d.accuracy.currentData() or d.accuracy.currentText()]) if maximum else 0
-        from .engine import extraction_size
-        requested_side = side
-        side = extraction_size(side, {"feature_method": d.feature_method.currentText()})
-        fine = d.feature_method.currentText()=="SIFT" and mode == "Fast" and d.c2f.isChecked() and side > COARSE_MAX_SIZE * 1.25
+        d.reference.setEnabled(d.photo_gps_on and mode == "Fast" and gps >= 2)
+        method = d.feature_method.currentText()
+        settings = {"accuracy": d.accuracy.currentData(), "feature_method": method, "mode": mode,
+                    "coarse_to_fine": d.c2f.isChecked()}
         kind = d.mapper.currentText()
         if kind == "Auto":
-            kind = "Global if supported; otherwise Incremental" if len(cameras) >= 100 else "Incremental"
+            kind = ("Global if supported; otherwise Incremental"
+                    if len(cameras) >= AUTO_GLOBAL_MIN_IMAGES else "Incremental")
         text = f"{len(cameras)} photos; solver: {kind}. "
-        text += f"Two stages: up to 1024 px / {side} px." if fine else f"One stage: {side or 'unknown'} px."
-        if mode == "Fast" and d.c2f.isChecked() and side and not fine:
-            text += " Target resolution does not require a second stage."
-        if d.feature_method.currentText() == "ALIKED + LightGlue":
-            text += " ALIKED uses at most 2048 px and one extraction worker to bound ONNX memory."
+        if maximum:
+            requested_side, side = alignment_extraction_sizes(maximum, settings)
+            if uses_coarse_alignment(settings, side):
+                text += f"Two stages: up to {COARSE_MAX_SIZE} px / {side} px."
+            else:
+                text += f"One stage: {side} px."
+                if d.c2f.isEnabled() and d.c2f.isChecked():
+                    text += " Target resolution does not require a second stage."
+        elif cameras:
+            requested_side = side = 0
+            text += "Photo dimensions will be checked during preparation."
+        else:
+            requested_side = side = 0
+            text += "Add photos to plan the extraction size."
+        if method == "ALIKED + LightGlue":
+            text += f" ALIKED uses at most {ALIKED_MAX_IMAGE_SIZE} px and one extraction worker to bound ONNX memory."
             if requested_side > side:
                 text += " Keypoints/calibration are restored to original photo coordinates."
         text += f" GPS available: {gps}."
+        no_preselection = not (d.generic.isChecked() or (d.reference.isEnabled() and d.reference.isChecked()))
+        if mode == "Fast" and no_preselection and len(cameras) >= 2:
+            pairs = math.comb(len(cameras), 2)
+            text += f" Both pair selectors are off. The first matching stage will consider all {pairs:,} photo pairs."
         d.summary.setText(text)
-    for control in (d.mode, d.mapper, d.accuracy):
+    for control in (d.mode, d.mapper, d.accuracy, d.feature_method):
         control.currentTextChanged.connect(update)
-    d.c2f.toggled.connect(update)
-    d.feature_method.currentTextChanged.connect(update)
+    for control in (d.c2f, d.generic, d.reference):
+        control.toggled.connect(update)
     button = QPushButton("Review calibration groups...")
+    button.setToolTip("Review or override the shared calibration groups used for alignment.")
+    button.setEnabled(d.single_camera.isChecked())
+    d.single_camera.toggled.connect(button.setEnabled)
     d.aform.addRow(button)
     d.calibration_groups = {}
     def groups():

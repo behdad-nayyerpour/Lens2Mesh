@@ -135,7 +135,7 @@ def test_workspace_rows_metashape_style(window, tmp_path):
     dataset = rows[0]
     assert "8 images" in dataset and not any(r.startswith("ProjectData ") for r in rows)
     assert "Images (7/8 aligned)" in rows
-    assert "Markers (3)" in rows
+    assert "GCPs (3)" in rows
     assert any(r.startswith("Tie Points (500 points") for r in rows)
     assert any(r.startswith("Point Cloud (5,000 points") for r in rows)
     assert any(r.startswith("3D Model (80 faces") for r in rows)

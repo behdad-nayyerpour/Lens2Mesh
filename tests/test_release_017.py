@@ -115,10 +115,10 @@ def _fake_runner(result):
     from PySide6.QtCore import QObject, Signal
 
     class FakeRunner(QObject):
-        progress = Signal(int, str); detail = Signal(str); log = Signal(str); finished = Signal(bool, str)
+        stepStarted = Signal(str); stageProgress = Signal(object); log = Signal(str); finished = Signal(bool, str)
         failure = None
 
-        def __init__(self, exe, steps, parent=None):
+        def __init__(self, exe, steps, parent=None, **kwargs):
             super().__init__(parent)
 
         def start(self):
@@ -179,7 +179,7 @@ def test_cpu_sampler_without_psutil(monkeypatch):
 def test_gpu_sampler_nvml_fake_and_missing():
     import ctypes
     from photomesh import statusmon as sm
-    assert not sm.GpuSampler(loader=lambda: None).available          # no NVIDIA driver -> hidden
+    assert not sm.GpuSampler(loader=lambda: None).available
 
     class FakeNvml:
         def nvmlInit_v2(self): return 0
@@ -192,13 +192,85 @@ def test_gpu_sampler_nvml_fake_and_missing():
             m = ctypes.cast(p, ctypes.POINTER(sm._Mem)).contents
             m.used, m.total = 2048 * 1024 * 1024, 6144 * 1024 * 1024; return 0
     g = sm.GpuSampler(loader=FakeNvml)
-    assert g.available and g.name.startswith("NVIDIA")
-    assert g.sample() == (57.0, 2048, 6144)
+    assert g.available
+    assert g.sample()["gpu_cards"] == (sm.GpuReading(0, "NVIDIA GeForce RTX 3060 Laptop GPU", 57.0, 2048, 6144),)
     assert sm.format_gpu(57.0, (2048, 6144)) == "GPU  57%  2.0/6 GB"
 
     class Broken(FakeNvml):
         def nvmlInit_v2(self): return 9                                  # driver/library mismatch
     assert not sm.GpuSampler(loader=Broken).available
+
+
+def test_gpu_sampler_recovers_an_initial_failure_and_lost_handle():
+    import ctypes
+    from photomesh import statusmon as sm
+
+    class Driver:
+        disconnected = False
+        closed = 0
+
+        def nvmlInit_v2(self): return 0
+        def nvmlShutdown(self): self.closed += 1
+        def nvmlDeviceGetHandleByIndex_v2(self, _index, _handle): return 0
+        def nvmlDeviceGetName(self, _handle, name, _length): name.value = b"NVIDIA test GPU"; return 0
+        def nvmlDeviceGetUtilizationRates(self, _handle, usage):
+            ctypes.cast(usage, ctypes.POINTER(sm._Util)).contents.gpu = 0
+            return 15 if self.disconnected else 0
+        def nvmlDeviceGetMemoryInfo(self, _handle, _memory): return 0
+
+    first, second = Driver(), Driver()
+    attempts = iter([None, first, second])
+    sampler = sm.GpuSampler(loader=lambda: next(attempts), fallback=lambda: ())
+    assert not sampler.available
+    assert sampler.sample()["gpu_cards"][0].load == 0.0
+    first.disconnected = True
+    assert sampler.sample()["gpu_cards"][0].load == 0.0
+    assert first.closed == 1 and sampler.lib is second and sampler.sample()["gpu_source"] == "NVML"
+    sampler.close()
+    assert second.closed == 1 and not sampler.available
+
+
+def test_gpu_driver_fallback_is_throttled():
+    from photomesh import statusmon as sm
+
+    calls = []
+    def fallback():
+        calls.append(True)
+        return (sm.GpuReading(0, "NVIDIA test GPU", 0.0, 128, 16384),)
+    sampler = sm.GpuSampler(loader=lambda: None, fallback=fallback)
+    first = sampler.sample()
+    assert sampler.sample() == first and calls == [True]
+    assert first["gpu_time"] is not None and first["gpu_source"] == "nvidia-smi"
+
+
+def test_gpu_driver_reports_partial_memory_and_command_failures(monkeypatch):
+    import subprocess
+    from photomesh import statusmon as sm
+
+    monkeypatch.setattr(sm.sys, "platform", "win32")
+    monkeypatch.setattr(sm.os.path, "isfile", lambda _: True)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 0, "0, NVIDIA A, 25, 512, 8192\n1, NVIDIA B, N/A, 200, 4096\n", ""))
+    assert sm._windows_gpu_sample() == (sm.GpuReading(0, "NVIDIA A", 25.0, 512, 8192),
+                                       sm.GpuReading(1, "NVIDIA B", None, 200, 4096))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 9, "", "driver error"))
+    with pytest.raises(OSError, match="exit 9: driver error"):
+        sm._windows_gpu_sample()
+
+
+def test_cpu_fallback_starts_with_a_fresh_counter(monkeypatch):
+    from photomesh import statusmon as sm
+
+    class FailedPsutil:
+        def cpu_percent(self, _interval):
+            raise OSError("sampling failed")
+
+    sampler = sm.CpuSampler()
+    sampler.ps = FailedPsutil()
+    readings = iter([(80, 100), (85, 110)])
+    monkeypatch.setattr(sampler, "_times", lambda: next(readings))
+    assert sampler.percent() is None
+    assert sampler.percent() == 50.0
 
 
 def test_monitor_samples_off_gui_thread_and_updates_status(window, qtbot):
@@ -209,25 +281,38 @@ def test_monitor_samples_off_gui_thread_and_updates_status(window, qtbot):
         def percent(self):
             Cpu.thread = threading.current_thread().name; return 42.0
 
-    class NoGpu:
-        available = False; name = ""
-        def sample(self): return None
-        def close(self): pass
-    mon = sm.ResourceMonitor(interval=0.05, cpu=Cpu(), gpu=NoGpu())
+    unblock = threading.Event()
+
+    class SlowGpu:
+        def sample(self):
+            unblock.wait(5)
+            return {"gpu_cards": ()}
+
+    mon = sm.ResourceMonitor(interval=0.05, cpu=Cpu(), gpu=SlowGpu())
     got = []
     mon.sampled.connect(got.append)
     mon.sampled.connect(window._show_resources)
+    try:
+        mon.start()
+        qtbot.waitUntil(lambda: len(got) >= 2, timeout=1000)
+        assert Cpu.thread == "cpu-monitor" and got[0]["cpu"] == 42.0
+        assert window.cpu_label.text() == "CPU  42%" and window.gpu_label.text() == "GPU usage unavailable"
+        assert "CUDA processing is checked separately." in window.gpu_label.toolTip()
+        assert all(thread.daemon for thread in mon._threads)
+    finally:
+        unblock.set()
+        mon.stop()
+    count = len(got)
     mon.start()
-    qtbot.waitUntil(lambda: len(got) >= 2, timeout=5000)
+    qtbot.waitUntil(lambda: len(got) > count, timeout=1000)
     mon.stop()
-    assert Cpu.thread == "resource-monitor" and got[0]["cpu"] == 42.0 and got[0]["gpu"] is None
-    assert window.cpu_label.text() == "CPU  42%" and window.gpu_label.text() == "GPU unavailable"
-    window._show_resources({"cpu": 5.0, "gpu": 80.0, "gpu_mem": (1024, 4096), "gpu_name": "NVIDIA X"})
-    assert window.gpu_label.isVisible() and window.gpu_label.text().startswith("GPU  80%")
-    # the window's own monitor runs in the background (never nvidia-smi)
-    assert window.monitor._thread is not None and window.monitor._thread.daemon
-    src = open(sm.__file__, encoding="utf-8").read()
-    assert "subprocess" not in src and "import psutil" in src
+
+    import time
+    cards = (sm.GpuReading(0, "NVIDIA A", 80.0, 1024, 4096),
+             sm.GpuReading(1, "NVIDIA B", None, 2048, 4096))
+    window._show_resources({"cpu": 5.0, "gpu_cards": cards, "gpu_time": time.monotonic() - 6})
+    assert window.gpu_label.isVisible() and window.gpu_label.text() == "GPU 0 80% · GPU 1 — · last"
+    assert "NVIDIA B" in window.gpu_label.toolTip() and "VRAM 2.0/4 GB" in window.gpu_label.toolTip()
 
 
 # ------------------------------------------------------------------ 6 GCP in the ortho view

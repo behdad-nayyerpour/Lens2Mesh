@@ -4,6 +4,7 @@ from __future__ import annotations
 from .exif import photo_metadata
 
 import json
+import math
 import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -152,6 +153,20 @@ class Project:
         """base = folder of the .pmsx: paths below it are written relative
         (portable project folder); photos/products elsewhere stay absolute."""
         datasets = [asdict(c) for c in self.datasets]
+        for cd in datasets:
+            # Optional marker metadata is kept beside marker records for older installations.
+            ignored, estimates = {}, {}
+            for marker in cd.get("markers") or ():
+                photos = marker.pop("ignored_photos", None)
+                if photos:
+                    ignored[marker["label"]] = photos
+                point = marker.pop("photo_model_xyz", None)
+                if point is not None:
+                    estimates[marker["label"]] = point
+            if ignored:
+                cd["gcp_ignored_photos"] = ignored
+            if estimates:
+                cd["gcp_photo_model_xyz"] = estimates
         if base:
             for cd in datasets:
                 for k in DATA_PATHS:
@@ -221,6 +236,17 @@ class Project:
                 for key in keys:
                     if isinstance(metadata.get(key), str):
                         metadata[key] = _resolve(metadata[key], base)
+            ignored = cd.get("gcp_ignored_photos")
+            estimates = cd.get("gcp_photo_model_xyz")
+            for marker in cd.get("markers") or ():
+                label = marker.get("label")
+                photos = ignored.get(label) if isinstance(ignored, dict) else None
+                if isinstance(photos, list) and all(isinstance(name, str) for name in photos):
+                    marker["ignored_photos"] = photos
+                point = estimates.get(label) if isinstance(estimates, dict) else None
+                if (isinstance(point, list) and len(point) == 3
+                        and all(isinstance(value, (int, float)) and math.isfinite(value) for value in point)):
+                    marker["photo_model_xyz"] = point
             cd = {k: v for k, v in cd.items() if k in known}
             # paths saved relative (0.1.7+, benchmark.py) are relative to the project file
             for k in DATA_PATHS:

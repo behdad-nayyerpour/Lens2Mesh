@@ -1,15 +1,15 @@
 # Installing a newer version
 
-## Lens2Mesh 1.0.5
+## Lens2Mesh 1.0.7
 
-The tested 1.0.5 candidate is accepted. Use the complete offline Setup below
+Use the complete offline Setup below
 for new installations and upgrades. Existing installation folders, projects and
 settings remain supported. The complete English manual is bundled and available
 offline from Help > User Manual (PDF).
 
 The smaller base installer preserves the existing optional NVIDIA runtime when
 upgrading. Fresh installations can use ALIKED/LightGlue on CPU immediately;
-install `Lens2Mesh_NeuralGPU_Addon_1.0.5.exe` separately for their GPU acceleration.
+install `Lens2Mesh_NeuralGPU_Addon_1.0.7.exe` separately for their GPU acceleration.
 Close the application and select its existing installation folder. Standard
 COLMAP GPU processing remains in the base installer.
 

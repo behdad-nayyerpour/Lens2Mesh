@@ -146,3 +146,23 @@ def test_resume_matching_reprobes_device_and_keeps_saved_pair_selection(pending,
     assert '--FeatureMatching.gpu_index' not in args
     assert args[args.index('--FeatureMatching.use_gpu')+1]=='0'
     assert args[args.index('--SiftMatching.guided_matching')+1]=='1'
+
+
+@pytest.mark.parametrize("method", ["SIFT + LightGlue", "ALIKED + LightGlue"])
+def test_resume_strips_incompatible_guidance_from_older_commands(pending, monkeypatch, method):
+    from photomesh import engine, fastpipe
+
+    dataset, work, record = pending
+    record["settings"].update(feature_method=method, guided_matching=True)
+    record.update(phase="matching", pairs=None, matching_args=[
+        "sequential_matcher", "--database_path", str(work / "database.db"),
+        "--SequentialMatching.overlap", "10", "--FeatureMatching.guided_matching", "1",
+        "--SiftMatching.guided_matching", "1",
+    ])
+    monkeypatch.setattr(engine, "matching_arguments", lambda *args: ["--FeatureMatching.use_gpu", "0"])
+    monkeypatch.setattr(fastpipe, "mapper_steps", lambda *args: [])
+    monkeypatch.setattr(resume, "choose_input", lambda *_: None)
+    for execution in (None, {"use_gpu": False, "guided_matching": False}):
+        args = resume.steps("engine", str(work), record, dataset, execution)[0][1]
+        assert args[:5] == record["matching_args"][:5]
+        assert not any("guided_matching" in part for part in args)

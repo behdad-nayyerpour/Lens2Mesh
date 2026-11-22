@@ -97,7 +97,7 @@ def test_rerun_recomputes_only_broken_views(tmp_path):
     assert (st / "patch-match.full.cfg").exists()
     pm = [a for l, a, _ in out if l == "Building depth maps"][0]
     assert pm[0] == "patch_match_stereo"
-    assert pm.meter.todo_p == len(refs) and pm.meter.todo_g == 2      # all photometric gone, 2 geometric
+    assert pm.meter.targets == {"photometric": set(refs), "geometric": {names[3], names[5]}}
     after = [a for l, a, _ in out if l == "Cleaning up depth maps"][0]
     after()
     assert not (st / "patch-match.full.cfg").exists()
@@ -162,7 +162,7 @@ def test_fusion_retries_with_less_memory_then_explains(tmp_path, monkeypatch):
     fu_steps = gates(steps)[1]()
     seen, msg = [], None
     for _ in range(10):
-        fu = [a for l, a, _ in fu_steps if l == "Building point cloud (fusion)"][0]
+        fu = [a for l, a, _ in fu_steps if l.startswith("Building point cloud (fusion)")][0]
         seen.append((fu[fu.index("--StereoFusion.use_cache") + 1], fu[fu.index("--StereoFusion.max_image_size") + 1]))
         (d / "fused.ply").write_bytes(b"partial")
         fu.exit_code, fu.error, fu.output_tail = -1073740791, "exit code -1073740791", ["std::bad_alloc"]
@@ -212,59 +212,57 @@ def test_exit_code_text():
 
 
 # ------------------------------------------------------------ progress meters
-class Clock:
-    def __init__(self):
-        self.t = 0.0
-
-    def __call__(self):
-        return self.t
-
-
-def test_patch_match_meter_two_passes_and_eta():
-    c = Clock()
-    m = PatchMatchMeter(4, 4, clock=c)
-    out = []
-    for i in range(8):
-        c.t = 10.0 * i
-        out.append(m.feed(f"Processing view {i % 4 + 1} / 4 for img{i % 4}.jpg"))
-    assert m.feed("Reading inputs...") is None
-    fr = [o[0] for o in out]
-    assert fr == sorted(fr) and fr[0] == 0 and fr[-1] < 1
-    assert "photometric pass 1/4" in out[0][1] and "geometric pass 1/4" in out[4][1]
-    assert "about" not in out[4][1]  # Learn the geometric pass rate separately.
-    assert "about 10 s left" in out[-1][1]
+def test_depth_counter_waits_for_complete_files_and_excludes_reused_maps(tmp_path):
+    name = "Café 01.jpg"
+    seen = set()
+    m = PatchMatchMeter([name], [name, "2.jpg"], lambda photo, kind: (kind, photo) in seen)
+    assert m.current().total == 1
+    m.feed("=== Processing view 4 / 8 for Café 01.jpg ===")
+    assert m.current().done == 0
+    m.feed("Writing photometric output for cached.jpg")
+    m.feed("Writing photometric output for Café 01.jpg")
+    assert m.poll() is None
+    seen.add(("photometric", name))
+    assert m.poll().done == 1
+    m.feed("Writing photometric output for Café 01.jpg")
+    assert m.poll() is None
+    update = m.feed("=== Processing view 2 / 8 for Café 01.jpg ===")
+    assert (update.label, update.done, update.total) == ("Geometric depth maps", 0, 2)
+    m.feed("Writing geometric output for 2.jpg")
+    m.feed("Writing geometric output for Café 01.jpg")
+    seen.add(("geometric", name))
+    assert m.poll().done == 1
     assert fmt_eta(3725) == "1 h 02 min" and fmt_eta(59) == "59 s"
 
 
-def test_fusion_meter():
-    m = FusionMeter(clock=Clock())
-    assert m.feed("Reading workspace...")[1].startswith("Fusion: loading")
-    f, t = m.feed("Fusing image [2/10] with index 3")
-    assert abs(f - 0.1) < 1e-9 and "image 2/10" in t
-    m.feed(" in 0.046s (28637607 points)")
-    assert "28.6 M points" in m.feed("Fusing image [3/10] with index 4")[1]
+def test_fusion_counts_completion_and_writing():
+    m = FusionMeter()
+    assert m.feed("Reading workspace...").label == "Loading depth maps for fusion"
+    assert m.feed("Fusing image [1/10] with index 3").done == 0
+    assert m.feed("fusion.cc:310] in 0.046s (28637607 points)").done == 1
+    assert m.feed("Fusing image [2/10] with index 4 in 1.201s (300 points)").done == 2
+    assert m.feed("Writing output: fused.ply").fraction is None
+    retry = FusionMeter(2)
+    update = retry.feed("Fusing image [1/5] with index 3")
+    assert update.done == 0 and "attempt 2" in update.label
 
 
-def test_runner_reports_depth_map_detail(qapp, qtbot):
+def test_runner_polls_depth_files_before_worker_exits(qapp, qtbot, tmp_path):
+    from PySide6.QtCore import QProcess
     from photomesh.colmap import PipelineRunner, Cmd
-    script = ("import sys\n"
-              "for p in range(2):\n"
-              "    for i in range(3): print(f'Processing view {i+1} / 3 for v{i}.jpg', flush=True)\n")
-    steps = [("Building depth maps", Cmd(["-c", script], meter=PatchMatchMeter(3, 3)), 70),
-             ("Building point cloud (fusion)", Cmd(["-c", "print('Fusing image [1/2] with index 0')"],
-                                                    meter=FusionMeter()), 15)]
-    r = PipelineRunner(sys.executable, steps)
-    details, prog = [], []
-    r.detail.connect(lambda p, t: details.append((p, t)))
-    r.progress.connect(lambda p, l: prog.append((p, l)))
-    with qtbot.waitSignal(r.finished, timeout=20000) as blocker:
-        r.start()
+    path = tmp_path / "complete"
+    script = ("import time; from pathlib import Path; "
+              "print('Writing photometric output for view.jpg', flush=True); "
+              "time.sleep(.2); "
+              f"Path({str(path)!r}).touch(); time.sleep(1.2)")
+    meter = PatchMatchMeter(["view.jpg"], [], lambda *_: path.is_file())
+    runner = PipelineRunner(sys.executable, [("Building depth maps", Cmd(["-c", script], meter=meter), 70)])
+    completed = []
+    runner.stageProgress.connect(lambda update: completed.append((update.done, runner.proc.state())) if update.done else None)
+    with qtbot.waitSignal(runner.finished, timeout=5000) as blocker:
+        runner.start()
     assert blocker.args[0] is True
-    dm = [d for d in details if d[1].startswith("Depth maps")]
-    assert len(dm) == 6 and [d[0] for d in dm] == sorted(d[0] for d in dm)
-    assert "geometric pass 3/3" in dm[-1][1] and dm[-1][0] < 100 * 70 / 85
-    assert any(t.startswith("Fusion: image 1/2") for _, t in details)
-    assert {l for _, l in prog} >= {"Building depth maps", "Building point cloud (fusion)"}
+    assert completed and completed[0] == (1, QProcess.ProcessState.Running)
 
 
 def test_runner_failed_fallback_gives_clear_message(qapp, qtbot):
@@ -281,13 +279,15 @@ def test_runner_failed_fallback_gives_clear_message(qapp, qtbot):
     assert blocker.args == [False, "'Building point cloud (fusion)' failed: explained"]
 
 
-def test_progress_dialog_detail_and_monotone(qapp):
+def test_progress_dialog_shows_stage_and_count(qapp):
     from photomesh.dialogs import ProgressDialog
+    from photomesh.progress import StageProgress
     dlg = ProgressDialog("Build Point Cloud")
-    dlg.set_progress(10, "Building depth maps")
-    dlg.set_detail(12.34, "Depth maps: photometric pass 5/640 - about 2 h 01 min left")
-    assert dlg.bar.value() == 123 and "photometric pass 5/640" in dlg.stage.text() and "12%" in dlg.bar.text()
-    dlg.set_progress(11, "Building depth maps")                  # int update must not move it back
-    assert dlg.bar.value() == 123
-    dlg.set_progress(80, "Building point cloud (fusion)")
-    assert dlg.bar.value() == 800 and "photometric" not in dlg.stage.text()
+    dlg.begin_stage("Building depth maps")
+    dlg.set_stage_progress(StageProgress("Photometric depth maps", 5, 640, "maps written"))
+    assert "Photometric depth maps" in dlg.stage.text()
+    assert "5/640 maps written" in dlg.timing.text()
+    dlg.begin_stage("Building point cloud (fusion)")
+    assert "Photometric" not in dlg.stage.text()
+    assert "5/640" not in dlg.timing.text()
+    dlg.running = False

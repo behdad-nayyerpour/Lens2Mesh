@@ -84,7 +84,11 @@ ACTION_LABELS = {
     "Export Point Cloud...": "Point Cloud...", "Export Model...": "Mesh...",
     "Export Mesh Contours...": "Mesh Contours (DXF)...", "Export Tiled Model...": "Tiled Model...",
     "Export Orthomosaic...": "Orthomosaic...", "Export DEM...": "DEM...",
-    "Export Cameras...": "Cameras...", "Export Markers...": "Markers...",
+    "Export Cameras...": "Cameras...", "Export Markers...": "GCPs...",
+    "Import Markers...": "Import GCPs...",
+    "Markers": "Ground Control Point",
+    "Add Marker": "Add GCP", "Refine Markers": "Refine GCPs",
+    "Show Markers": "Show GCPs", "Show Marker Labels": "Show GCP Labels",
     "Export Reference": "Reference...", "Export Shapes...": "Shapes...",
 }
 

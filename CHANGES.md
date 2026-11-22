@@ -4,6 +4,14 @@ Changes are listed from newest to oldest. Installation instructions in older
 entries describe the release at that time; current releases use one full Setup
 EXE. See [Updating](UPDATING.md).
 
+### 1.0.7
+
+- Show measured work, elapsed time and reliable estimates for the active processing stage.
+- Choose GPS, ground control points or compatible combinations during alignment.
+- Fit surveyed local coordinates after GPS alignment and protect the last camera solution during optimization.
+- Improve point placement, photo filtering and GCP selection across photo, orthophoto and 3D views.
+- Update the offline English manual for alignment, ground control, local survey grids and progress.
+
 ### 1.0.6 (2026-11-21)
 
 - Preserve full photo names, including spaces and Unicode, in Fast pair matching and text camera/covisibility readers. Stop before camera estimation if matching produces no verified connections.

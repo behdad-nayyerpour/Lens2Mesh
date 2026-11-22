@@ -81,7 +81,7 @@ def build_toolbar(window):
 
     layer("ortho", "Ortho"); layer("dem", "DEM")
     bottom.addSeparator()
-    for key, label in (("cameras", "Cameras"), ("markers", "Markers"), ("shapes", "Shapes"),
+    for key, label in (("cameras", "Cameras"), ("markers", "GCPs"), ("shapes", "Shapes"),
                        ("region", "Region"), ("grid", "Grid")):
         layer(key, label)
     window.transparency_action = window.actions["Transparent View"]

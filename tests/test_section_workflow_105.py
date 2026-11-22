@@ -105,13 +105,14 @@ def test_photo_context_and_control_edits_are_blocked_then_restored(window, tmp_p
     photo = window.photo_view
     calls = []; photo.addMarker.connect(lambda *_: calls.append('add'))
     menus = []
-    from PySide6 import QtWidgets
+    from photomesh import views
     class TestMenu(QMenu):
         def exec(self, *_args):
             menus.append(True)
-    monkeypatch.setattr(QtWidgets, 'QMenu', TestMenu)
+    monkeypatch.setattr(views, 'QMenu', TestMenu)
+    click = photo.view.mapFromScene(photo.view.sceneRect().center())
     window.show_cross_section()
-    photo._context(QPoint(100, 100)); photo.ctrl_click(500, 500)
+    photo._context(click); photo.ctrl_click(500, 500)
     assert calls == [] and menus == [] and not window.actions['Add Marker'].isEnabled()
     assert window.add_marker_at_photo(500, 500) is None
     photo.view.setFocus()
@@ -119,7 +120,9 @@ def test_photo_context_and_control_edits_are_blocked_then_restored(window, tmp_p
     assert not window.dataset.markers
     window._survey_dialog.close()
     assert window.actions['Add Marker'].isEnabled()
-    photo._context(QPoint(100, 100)); photo.ctrl_click(500, 500)
+    photo.fit()
+    photo._context(photo.view.mapFromScene(photo.view.sceneRect().center()))
+    photo.ctrl_click(500, 500)
     assert menus and calls == ['add']
 
 

@@ -659,7 +659,7 @@ def _project_md(p):
         return p["error"]
     rows = [("Photos", f"{p['photos']} ({p['enabled']} enabled, {p['aligned']} aligned, {p['with_gps']} with GPS)"),
             ("Photo sizes", ", ".join(f"{k} x{v}" for k, v in p["photo_sizes"].items())),
-            ("Markers", p["markers"]),
+            ("GCPs", p["markers"]),
             ("Tie points", f"{p['tie_points']:,}"), ("Dense points", f"{p['dense_points']:,}"),
             ("Mesh faces", f"{p['mesh_faces']:,}"),
             ("Products", ", ".join(k for k in ("texture", "tiled_model", "orthomosaic", "dem") if p.get(k)) or "-"),

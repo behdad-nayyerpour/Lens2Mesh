@@ -16,7 +16,8 @@ import sys
 import numpy as np
 from .colmap_io import qvec_to_rot
 from .engine import child_env
-from PySide6.QtCore import QObject, QProcess, Signal, QSettings, Qt, Slot
+from PySide6.QtCore import QObject, QProcess, QTimer, Signal, QSettings, Qt, Slot
+from .progress import (MappingMeter, MatchingMeter, command_progress, extraction_progress)
 
 _HELP_CACHE: dict = {}
 
@@ -225,13 +226,22 @@ def opt(exe, command, candidates, value):
     return []
 
 
-def image_max_dim(paths) -> int:
+def alignment_photo_infos(cameras, infos):
+    """Fill missing dimensions from source image headers without decoding pixels."""
     from PySide6.QtGui import QImageReader
-    best = 0
-    for p in paths[:5]:
-        s = QImageReader(p).size()
-        best = max(best, s.width(), s.height())
-    return best or 3200
+    resolved = []
+    for camera, info in zip(cameras, infos, strict=True):
+        if not image_long_edge(info):
+            size = QImageReader(camera.path).size()
+            if size.isValid():
+                info = dict(info, width=size.width(), height=size.height())
+        resolved.append(info)
+    return resolved
+
+
+def image_long_edge(info):
+    width, height = info.get("width") or 0, info.get("height") or 0
+    return max(width, height) if width > 0 and height > 0 else 0
 
 
 # --------------------------------------------------------------- pipelines
@@ -241,12 +251,23 @@ QUALITY = ["Ultra high", "High", "Medium", "Low", "Lowest"]
 DEPTH_FILTERING = ["Disabled", "Mild", "Moderate", "Aggressive"]
 
 
+def alignment_extraction_sizes(longest_side, settings):
+    """Return the selected and effective maximum sizes for the longest edge."""
+    from .engine import extraction_size
+    requested = max(256, (longest_side or 3200) // ACCURACY_DOWNSCALE[settings["accuracy"]])
+    return requested, extraction_size(requested, settings)
+
+
 def align_steps(exe, dataset, wd, s, names=None, infos=None):
     """Steps for Align Photos. s = settings dict from AlignPhotosDialog.
 
     s["mode"]: "Fast" (fastpipe: preselected pairs + coarse-to-fine, default),
                "Exhaustive" or "Sequential" (plain COLMAP matchers).
     """
+    cameras = [c for c in dataset.cameras if c.enabled]
+    if infos is None:
+        infos = [c.info() for c in cameras]
+    infos = alignment_photo_infos(cameras, infos)
     if s.get("mode", "Fast") == "Fast" and names is not None:
         from .fastpipe import fast_align_steps
         return fast_align_steps(exe, wd, names, infos, s)
@@ -254,9 +275,8 @@ def align_steps(exe, dataset, wd, s, names=None, infos=None):
     img_dir = image_dir(wd)
     db = os.path.join(wd, "database.db")
     sparse = os.path.join(wd, "sparse")
-    maxdim = image_max_dim([c.path for c in dataset.cameras if c.enabled])
-    from .engine import extraction_size
-    max_size = extraction_size(max(256, maxdim // ACCURACY_DOWNSCALE[s["accuracy"]]), s)
+    maxdim = max(map(image_long_edge, infos), default=0)
+    _, max_size = alignment_extraction_sizes(maxdim, s)
     fe = ["feature_extractor", "--database_path", db, "--image_path", img_dir,
           "--image_list_path", image_list(wd),
           "--ImageReader.single_camera", "0"]   # identical cameras merged below
@@ -272,11 +292,8 @@ def align_steps(exe, dataset, wd, s, names=None, infos=None):
     matcher = "sequential_matcher" if s.get("sequential") else "exhaustive_matcher"
     m = [matcher, "--database_path", db]
     m += matching_arguments(exe, matcher, s)
-    if s.get("guided_matching"):
-        m += opt(exe, matcher, ["FeatureMatching.guided_matching",
-                                "SiftMatching.guided_matching"], "1")
     from .fastpipe import mapper_steps, camera_groups_step
-    n_img = len([c for c in dataset.cameras if getattr(c, "enabled", True)])
+    n_img = len(cameras)
     if os.path.exists(db):
         os.remove(db)
     os.makedirs(sparse, exist_ok=True)
@@ -424,32 +441,37 @@ def count_points3d(path):
 
 # ----------------------------------------------------------------- runner
 class PipelineRunner(QObject):
-    progress = Signal(int, str)   # percent, stage label (constant per step)
-    stageProgress = Signal(float, str)
-    detail = Signal(float, str)   # fine percent, e.g. "Depth maps: geometric pass 12/640 - about 40 min left"
+    stepStarted = Signal(str)
+    stageProgress = Signal(object)
     log = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, exe, steps, parent=None):
+    def __init__(self, exe, steps, parent=None, *, photos=0):
         super().__init__(parent)
         self.exe = exe
         self.steps = steps
-        self.total = sum(w for _, _, w in steps) or 1
-        self.done_weight = 0
+        self.photos = photos
         self.idx = -1
         self.proc = None
         self.cancelled = False
         self._ended = False
         self._tail = []
-        self._output_buffer = ""
+        self._output_buffer = b""
         self._callback_job = None
         self.failure = None          # details of the failed step, for error reports
         self._cmd = None
         self._command_cleanup = None
+        self._meter = None
+        self._parse_progress = None
+        self._last_progress = None
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(1000)
+        self._progress_timer.timeout.connect(self._poll_meter)
         self.finished.connect(self._mark_end)
 
     def _mark_end(self, *_):
         self._ended = True
+        self._progress_timer.stop()
 
     def _fail(self, msg, exit_code=None, crashed=False, exc=None):
         import traceback as _tb
@@ -482,22 +504,17 @@ class PipelineRunner(QObject):
         if self.cancelled:
             self.finished.emit(False, "Cancelled by user")
             return
-        if self.idx >= 0:
-            self.done_weight += self.steps[self.idx][2]
         self.idx += 1
         if self.idx >= len(self.steps):
-            self.progress.emit(100, "Finished")
             self.finished.emit(True, "Finished")
             return
         label, args, _ = self.steps[self.idx]
         self._cmd = None
         if label == "log":
             self.log.emit(f"[fastpipe] {args}")
-            self.idx += 0
             return self._next()
-        if label != "gate":
-            self.stageProgress.emit(-1.0, label)
-            self.progress.emit(int(100 * self.done_weight / self.total), label)
+        self._last_progress = None
+        self.stepStarted.emit(label)
         if callable(args):
             from .bgjob import BackgroundJob
             job = BackgroundJob(lambda report, cancelled: args() or [], name=label, parent=self)
@@ -517,16 +534,35 @@ class PipelineRunner(QObject):
             if isinstance(args, Try):
                 return self._fallback(args, str(e))
             self._fail(f"'{label}' failed: {e}", exc=e); return
+        self._meter = getattr(args, "meter", None)
+        command = args[0] if args else ""
+        if self._meter is not None:
+            self._parse_progress = self._meter.feed
+            if hasattr(self._meter, "poll"):
+                self._emit_progress(self._meter.current())
+                self._progress_timer.start()
+        elif command in (GLOMAP, "mapper", "global_mapper", "hierarchical_mapper",
+                         "bundle_adjuster", "point_triangulator"):
+            self._parse_progress = MappingMeter(self.photos, incremental=command == "mapper").feed
+        elif command == "feature_extractor":
+            self._parse_progress = extraction_progress
+        elif command.endswith("_matcher") or command == "matches_importer":
+            self._parse_progress = MatchingMeter().feed
+        else:
+            self._parse_progress = lambda line: command_progress(line, label)
         self._cmd = [prog] + list(pargs)
         self.log.emit(f"> {os.path.basename(prog)} {' '.join(pargs)}")
         self._tail = []
-        self._output_buffer = ""
+        self._output_buffer = b""
         self.proc = QProcess(self)
         if args and args[0] == PYTHON:
             from PySide6.QtCore import QProcessEnvironment
             env = QProcessEnvironment()
             for k, v in task_env().items():
                 env.insert(k, v)
+            if len(args) > 1 and args[1] == "georef":
+                # The matrix-free solve makes many short BLAS reductions.
+                env.insert("OPENBLAS_NUM_THREADS", "1")
             self.proc.setProcessEnvironment(env)
         else:
             from PySide6.QtCore import QProcessEnvironment
@@ -557,38 +593,30 @@ class PipelineRunner(QObject):
             self._fail(f"'{label}' failed: {error}", exc=exception)
         else:
             self.steps[self.idx + 1:self.idx + 1] = extra or []
-            self.total += sum(w for _, _, w in (extra or []))
             self._next()
 
-    def _read(self):
-        text = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "ignore")
-        label, _, w = self.steps[self.idx]
-        meter = getattr(self.steps[self.idx][1], "meter", None)
-        self._output_buffer += text.replace("\r", "\n")
-        lines = self._output_buffer.split("\n")
-        self._output_buffer = lines.pop()
-        for line in lines:
-            if line.strip():
-                self.log.emit(line.rstrip())
-                self._tail = (self._tail + [line.rstrip()])[-40:]
-            if meter is not None:
-                try:
-                    r = meter.feed(line)
-                except Exception:   # noqa: BLE001 - a meter must never break a step
-                    r = None
-                if r:
-                    frac, txt = r
-                    self.stageProgress.emit(min(1.0, max(0.0, frac)), txt)
-                    fine = 100.0 * (self.done_weight + w * frac) / self.total
-                    self.progress.emit(min(int(fine), 99), label)
-                    self.detail.emit(min(fine, 99.9), txt)
+    def _emit_progress(self, update):
+        if update is not None and update != self._last_progress and not self.cancelled:
+            self._last_progress = update
+            self.stageProgress.emit(update)
+
+    def _poll_meter(self):
+        if self._meter is not None and hasattr(self._meter, "poll") and not self.cancelled:
+            self._emit_progress(self._meter.poll())
+
+    def _read(self, final=False):
+        data = bytes(self.proc.readAllStandardOutput()).replace(b"\r", b"\n")
+        lines = (self._output_buffer + data).split(b"\n")
+        self._output_buffer = b"" if final else lines.pop()
+        for raw in lines:
+            line = raw.decode("utf-8", "replace").rstrip()
+            if not line:
                 continue
-            m = re.search(r"\[(\d+)/(\d+)\]", line)
-            if m and int(m.group(2)) > 0:
-                frac = min(1.0, int(m.group(1)) / int(m.group(2)))
-                self.stageProgress.emit(frac, line.strip())
-                pct = int(100 * (self.done_weight + w * frac) / self.total)
-                self.progress.emit(min(pct, 99), label)
+            self.log.emit(line)
+            self._tail = (self._tail + [line])[-40:]
+            self._emit_progress(self._parse_progress(line))
+        if final:
+            self._poll_meter()
 
     def _fallback(self, args, why, code=None):
         label = self.steps[self.idx][0]
@@ -601,22 +629,21 @@ class PipelineRunner(QObject):
         self.log.emit(f"[fastpipe] '{label}' did not succeed ({why}) - "
                       + ("using fallback" if extra else "continuing"))
         self.steps[self.idx + 1:self.idx + 1] = extra
-        self.total += sum(w for _, _, w in extra)
         self._next()
 
     def _error(self, err):
         if err == QProcess.FailedToStart and not self._ended:
+            self._progress_timer.stop()
             args = self.steps[self.idx][1]
             if isinstance(args, Try):    # finished() is not emitted after FailedToStart
                 return self._fallback(args, "failed to start")
             self._fail(f"Failed to start: {self.exe}")
 
     def _done(self, code, status):
-        if self._output_buffer:
-            self._output_buffer += "\n"
-            self._read()
         if self._ended:
             return
+        self._progress_timer.stop()
+        self._read(final=True)
         try:
             self._cleanup_command(code == 0 and status == QProcess.NormalExit and not self.cancelled)
         except Exception as error:
