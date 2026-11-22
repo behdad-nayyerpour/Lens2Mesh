@@ -21,7 +21,6 @@ def test_reported_aliked_size_is_bounded_in_all_builders(tmp_path, monkeypatch, 
                "FeatureMatching.type", "FeatureMatching.num_threads",
                "AlikedMatching.lightglue_model_path"}
     monkeypatch.setattr(colmap, "colmap_options", lambda *_: options)
-    monkeypatch.setattr(colmap, "image_max_dim", lambda *_: 5472)
     monkeypatch.setattr(engine, "gpu_device", lambda *_: None)
     monkeypatch.setattr(engine, "verified_model", lambda *a: "/offline/" + a[-1])
     settings = {"accuracy": "High", "mode": mode, "feature_method": "ALIKED + LightGlue",

@@ -346,6 +346,30 @@ def test_rescale_keypoints_and_camera_to_original(tmp_path):
     con.close()
 
 
+def test_fisheye_resize_preserves_distortion_and_round_trips_intrinsics(tmp_path):
+    import numpy as np
+    from photomesh.colmap_io import MODEL_ID
+
+    db = str(tmp_path / "fisheye.db")
+    _feature_db(db, 1000, 800, 500.0, [[100, 200, 1, 0, 0, 1]])
+    original = np.array([500.0, 600.0, 490.0, 395.0, 0.01, -0.02, 0.003, -0.0004])
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE cameras SET model=?, params=?", (MODEL_ID["OPENCV_FISHEYE"], original.tobytes()))
+    dims = {"a.jpg": {"orig": (2000, 1800), "work": (1000, 800)}}
+    fp.rescale_db_to_original(db, dims, "work")
+    with sqlite3.connect(db) as con:
+        w, h, params = con.execute("SELECT width, height, params FROM cameras").fetchone()
+        keypoints = np.frombuffer(con.execute("SELECT data FROM keypoints").fetchone()[0], np.float32)
+    assert (w, h) == (2000, 1800)
+    np.testing.assert_allclose(np.frombuffer(params), original * [2, 2.25, 2, 2.25, 1, 1, 1, 1])
+    np.testing.assert_allclose(keypoints[:2], [200.0, 450.0])
+    fp.set_cameras_to_work_size(db, dims, "work")
+    with sqlite3.connect(db) as con:
+        w, h, params = con.execute("SELECT width, height, params FROM cameras").fetchone()
+    assert (w, h) == (1000, 800)
+    np.testing.assert_allclose(np.frombuffer(params), original)
+
+
 def test_fast_steps_use_cache_and_feature_cap(tmp_path, monkeypatch):
     _fast_wd(tmp_path, monkeypatch)  # sets option/glomap stubs
     names = ["a.jpg", "b.jpg"]

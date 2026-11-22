@@ -225,13 +225,22 @@ def opt(exe, command, candidates, value):
     return []
 
 
-def image_max_dim(paths) -> int:
+def alignment_photo_infos(cameras, infos):
+    """Fill missing dimensions from source image headers without decoding pixels."""
     from PySide6.QtGui import QImageReader
-    best = 0
-    for p in paths[:5]:
-        s = QImageReader(p).size()
-        best = max(best, s.width(), s.height())
-    return best or 3200
+    resolved = []
+    for camera, info in zip(cameras, infos, strict=True):
+        if not image_long_edge(info):
+            size = QImageReader(camera.path).size()
+            if size.isValid():
+                info = dict(info, width=size.width(), height=size.height())
+        resolved.append(info)
+    return resolved
+
+
+def image_long_edge(info):
+    width, height = info.get("width") or 0, info.get("height") or 0
+    return max(width, height) if width > 0 and height > 0 else 0
 
 
 # --------------------------------------------------------------- pipelines
@@ -241,12 +250,23 @@ QUALITY = ["Ultra high", "High", "Medium", "Low", "Lowest"]
 DEPTH_FILTERING = ["Disabled", "Mild", "Moderate", "Aggressive"]
 
 
+def alignment_extraction_sizes(longest_side, settings):
+    """Return the selected and effective maximum sizes for the longest edge."""
+    from .engine import extraction_size
+    requested = max(256, (longest_side or 3200) // ACCURACY_DOWNSCALE[settings["accuracy"]])
+    return requested, extraction_size(requested, settings)
+
+
 def align_steps(exe, dataset, wd, s, names=None, infos=None):
     """Steps for Align Photos. s = settings dict from AlignPhotosDialog.
 
     s["mode"]: "Fast" (fastpipe: preselected pairs + coarse-to-fine, default),
                "Exhaustive" or "Sequential" (plain COLMAP matchers).
     """
+    cameras = [c for c in dataset.cameras if c.enabled]
+    if infos is None:
+        infos = [c.info() for c in cameras]
+    infos = alignment_photo_infos(cameras, infos)
     if s.get("mode", "Fast") == "Fast" and names is not None:
         from .fastpipe import fast_align_steps
         return fast_align_steps(exe, wd, names, infos, s)
@@ -254,9 +274,8 @@ def align_steps(exe, dataset, wd, s, names=None, infos=None):
     img_dir = image_dir(wd)
     db = os.path.join(wd, "database.db")
     sparse = os.path.join(wd, "sparse")
-    maxdim = image_max_dim([c.path for c in dataset.cameras if c.enabled])
-    from .engine import extraction_size
-    max_size = extraction_size(max(256, maxdim // ACCURACY_DOWNSCALE[s["accuracy"]]), s)
+    maxdim = max(map(image_long_edge, infos), default=0)
+    _, max_size = alignment_extraction_sizes(maxdim, s)
     fe = ["feature_extractor", "--database_path", db, "--image_path", img_dir,
           "--image_list_path", image_list(wd),
           "--ImageReader.single_camera", "0"]   # identical cameras merged below
@@ -272,11 +291,8 @@ def align_steps(exe, dataset, wd, s, names=None, infos=None):
     matcher = "sequential_matcher" if s.get("sequential") else "exhaustive_matcher"
     m = [matcher, "--database_path", db]
     m += matching_arguments(exe, matcher, s)
-    if s.get("guided_matching"):
-        m += opt(exe, matcher, ["FeatureMatching.guided_matching",
-                                "SiftMatching.guided_matching"], "1")
     from .fastpipe import mapper_steps, camera_groups_step
-    n_img = len([c for c in dataset.cameras if getattr(c, "enabled", True)])
+    n_img = len(cameras)
     if os.path.exists(db):
         os.remove(db)
     os.makedirs(sparse, exist_ok=True)

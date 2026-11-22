@@ -122,13 +122,22 @@ def steps(exe,workdir,record,dataset,execution=None):
     root=Path(workdir);settings=dict(record['settings']);planned=[]
     if execution is not None:settings.update(execution)
     if record['phase']=='matching':
+        from .engine import GUIDED_MATCHING_OPTIONS, matching_arguments, supports_guided_matching
         args=list(record['matching_args'])
+        current=[]
+        replace=set()
+        guided_flags={'--' + option for option in GUIDED_MATCHING_OPTIONS}
+        if not supports_guided_matching(settings.get('feature_method','SIFT')):
+            replace.update(guided_flags)
         if execution is not None:
             # Re-probe the device without changing the saved feature method.
             # A resumed laptop may no longer have the original GPU available.
-            from .engine import matching_arguments
             current=matching_arguments(exe,args[0],settings)
-            replace=set(current[::2])|{'--FeatureMatching.gpu_index','--SiftMatching.gpu_index'}
+            replace.update(current[::2])
+            replace.update(('--FeatureMatching.gpu_index','--SiftMatching.gpu_index'))
+            if 'guided_matching' in settings or guided_flags.intersection(current[::2]):
+                replace.update(guided_flags)
+        if replace:
             args=[args[0]]+[part for key,value in zip(args[1::2],args[2::2])
                             if key not in replace for part in (key,value)]+current
         action=(PairImport(args,root/'database.db',record['pairs'],cm.image_list(workdir))

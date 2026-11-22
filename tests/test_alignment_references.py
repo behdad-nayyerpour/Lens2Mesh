@@ -62,6 +62,44 @@ def test_dialog_reference_choices_are_independent_and_use_measurements(window, t
     assert not control_availability(ch)[0]
 
 
+@pytest.mark.parametrize("visual", [False, True])
+def test_fast_alignment_prepares_only_missing_visual_descriptors(window, tmp_path, monkeypatch, visual):
+    from photomesh import fastpipe, mainwindow
+
+    paths = [tmp_path / name for name in ("a.jpg", "b.jpg")]
+    for path in paths:
+        path.write_bytes(b"photo")
+    cached = tmp_path / "cached.npy"
+    cached.touch()
+    window.dataset.cameras = [
+        Camera(str(paths[0]), desc=str(cached), width=123, height=100),
+        Camera(str(paths[1]), width=123, height=100),
+    ]
+    window.project.path = str(tmp_path / "survey.pmsx")
+    monkeypatch.setattr(window, "_require_saved", lambda _: True)
+    monkeypatch.setattr(window, "_need_colmap", lambda: "engine")
+    monkeypatch.setattr(AlignPhotosDialog, "exec", lambda _: True)
+    monkeypatch.setattr(AlignPhotosDialog, "settings", lambda _:
+                        {"mode": "Fast", "accuracy": "High", "generic": visual})
+    monkeypatch.setattr(window, "cancel_thumbnails", lambda: None)
+    analyzed = []
+    runs = []
+
+    def analyze(sources, cache, **kwargs):
+        analyzed.extend(sources)
+        return {path: {"desc": str(cached), "width": 300, "height": 200} for path in sources}
+
+    monkeypatch.setattr(fastpipe, "analyze_images", analyze)
+    monkeypatch.setattr(mainwindow, "run_modal", lambda parent, title, label, fn, total:
+                        (fn(lambda *_: None, lambda: False), False, None))
+    monkeypatch.setattr(window, "_run", lambda title, *args, **kwargs: runs.append(title))
+    window.align_photos()
+    assert runs == ["Align Photos"]
+    assert analyzed == ([str(paths[1])] if visual else [])
+    assert window.dataset.cameras[0].width == 123
+    assert window.dataset.cameras[1].width == (300 if visual else 123)
+
+
 @pytest.mark.parametrize("gps,gcps,local", [(False, False, False), (True, False, False), (False, True, False),
                                           (True, True, False), (True, False, True)])
 def test_alignment_applies_only_selected_references_and_publishes_diagnostics(window, tmp_path, monkeypatch,

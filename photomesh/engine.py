@@ -127,6 +127,14 @@ def group_capability(exe, command):
 # ALIKED allocates dense feature maps before selecting keypoints. The keypoint
 # limit alone cannot bound its multi-GB full-resolution ONNX intermediates.
 ALIKED_MAX_IMAGE_SIZE = 2048
+NEURAL_DEFAULT_KEYPOINTS = 2048
+NEURAL_MAX_KEYPOINTS = 4096
+GUIDED_MATCHING_OPTIONS = ("FeatureMatching.guided_matching", "SiftMatching.guided_matching")
+
+
+def supports_guided_matching(method):
+    """The bundled LightGlue matchers cannot run a guided matching pass."""
+    return method == "SIFT"
 
 
 def extraction_size(requested, settings):
@@ -153,10 +161,12 @@ def matching_arguments(exe, command, settings, extraction=False):
     if method == "SIFT":
         if group + ".type" in supported:
             args += ["--" + group + ".type", "SIFT" if extraction else "SIFT_BRUTEFORCE"]
+        if not extraction and settings.get("guided_matching"):
+            args += opt(exe, command, GUIDED_MATCHING_OPTIONS, 1)
         return args
     limit = settings.get("key_point_limit", 0)
-    if limit <= 0 or limit > 4096:
-        raise ValueError("Neural matching requires an explicit feature limit from 1 to 4096")
+    if not 1 <= limit <= NEURAL_MAX_KEYPOINTS:
+        raise ValueError(f"Neural matching requires an explicit feature limit from 1 to {NEURAL_MAX_KEYPOINTS}")
     if group + ".num_threads" in supported:
         args += ["--" + group + ".num_threads", "1" if extraction or use_gpu else "2"]
     if method not in ("SIFT + LightGlue", "ALIKED + LightGlue"):
@@ -361,7 +371,11 @@ def execution_settings(exe, settings, workdir, log=print):
     method = s.get("feature_method", "SIFT")
     device = gpu_device(exe, s.get("use_gpu", False))
     s["use_gpu"] = bool(device)
-    key = (fingerprint(exe), method, json.dumps(device, sort_keys=True))
+    guided = supports_guided_matching(method) and bool(s.get("guided_matching"))
+    if s.get("guided_matching") and not guided:
+        log(f"Skipping the unsupported guided matching pass for {method}.")
+    s["guided_matching"] = guided
+    key = (fingerprint(exe), method, guided, json.dumps(device, sort_keys=True))
     # Recheck model identity even when the native compatibility result is cached.
     if method != "SIFT":
         matching_arguments(exe, "feature_extractor", s, True)

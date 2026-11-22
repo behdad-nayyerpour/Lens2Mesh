@@ -73,8 +73,80 @@ def test_alignment_has_four_resolutions_and_explicit_default(window):
     d=AlignPhotosDialog(window)
     assert d.accuracy.count()==4 and d.key_limit.value()==24000
     assert not d.reference.isEnabled()
-    assert "One stage" in d.summary.text()
+    assert "Add photos" in d.summary.text()
     assert "Engine default" in d.key_limit.specialValueText()
+
+
+def test_alignment_disables_unsupported_guidance_and_zero_feature_limit(window):
+    from photomesh.dialogs import AlignPhotosDialog
+
+    dialog = AlignPhotosDialog(window)
+    dialog.guided.setChecked(True)
+    assert dialog.settings()["guided_matching"]
+    for method in ("SIFT + LightGlue", "ALIKED + LightGlue"):
+        dialog.feature_method.setCurrentText(method)
+        assert dialog.key_limit.value() == 2048
+        assert dialog.key_limit.maximum() == 4096
+        dialog.key_limit.setValue(0)
+        settings = dialog.settings()
+        assert settings["key_point_limit"] == 1 and dialog.key_limit.text() == "1"
+        assert not dialog.guided.isEnabled() and not dialog.guided.isChecked()
+        assert not settings["guided_matching"]
+    dialog.feature_method.setCurrentText("SIFT")
+    dialog.key_limit.setValue(0)
+    assert dialog.guided.isEnabled() and dialog.key_limit.text() == "Engine default"
+
+
+def test_alignment_warns_when_fast_considers_all_pairs(window):
+    from photomesh.dialogs import AlignPhotosDialog
+    from photomesh.project import Camera
+
+    window.dataset.cameras = [
+        Camera(str(i), width=4000, height=3000, lon=40 + i * 0.001, lat=45, alt=500)
+        for i in range(50)
+    ]
+    dialog = AlignPhotosDialog(window)
+    assert dialog.reference.isEnabled() and dialog.reference.isChecked()
+    dialog.generic.setChecked(False)
+    assert "all 1,225" not in dialog.summary.text()
+    dialog.reference.setChecked(False)
+    assert "all 1,225 photo pairs" in dialog.summary.text()
+    dialog.mode.setCurrentText("Sequential")
+    assert "all 1,225" not in dialog.summary.text()
+    dialog.mode.setCurrentText("Fast")
+    assert "all 1,225" in dialog.summary.text()
+    dialog.generic.setChecked(True)
+    assert "all 1,225" not in dialog.summary.text()
+
+
+@pytest.mark.parametrize("mode", ["Fast", "Exhaustive", "Sequential"])
+def test_preview_and_extraction_use_largest_enabled_photo(window, tmp_path, monkeypatch, mode):
+    from PIL import Image
+    from photomesh import colmap
+    from photomesh.dialogs import AlignPhotosDialog
+    from photomesh.project import Camera
+
+    large = tmp_path / "sixth.png"
+    Image.new("RGB", (60, 4600)).save(large)
+    cameras = [Camera(str(i), width=1000, height=750) for i in range(5)]
+    cameras += [Camera(str(large)), Camera("inactive", width=9000, height=9100, enabled=False)]
+    window.dataset.cameras = cameras
+    dialog = AlignPhotosDialog(window)
+    dialog.mode.setCurrentText(mode)
+    dialog.accuracy.setCurrentText("Half")
+    assert "checked during preparation" in dialog.summary.text()
+    settings = dict(dialog.settings(), use_gpu=False)
+    monkeypatch.setattr(colmap, "colmap_options", lambda *_: {"FeatureExtraction.max_image_size"})
+    steps = colmap.align_steps("engine", window.dataset, str(tmp_path), settings,
+                              names=[str(i) for i in range(6)])
+    extraction_sizes = [args[args.index("--FeatureExtraction.max_image_size") + 1]
+                        for _, args, _ in steps if isinstance(args, list) and args[0] == "feature_extractor"]
+    assert extraction_sizes == (["1024", "2300"] if mode == "Fast" else ["2300"])
+    cameras[5].width, cameras[5].height = 60, 4600
+    known = AlignPhotosDialog(window)
+    known.mode.setCurrentText(mode)
+    known.accuracy.setCurrentText("Half")
+    assert "2300 px" in known.summary.text()
 
 
 def test_alignment_layout_and_unavailable_ground_controls(window):

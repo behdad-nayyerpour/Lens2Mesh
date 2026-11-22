@@ -251,19 +251,31 @@ class AlignPhotosDialog(_SettingsDialog):
         self.aform.addRow("Key point limit:", self.key_limit)
         for w in (self.guided, self.single_camera):
             self.aform.addRow(w)
-        self.key_limit.setToolTip("Maximum features per image. Engine default omits the override; no hidden fine-stage cap.")
+        from .engine import NEURAL_DEFAULT_KEYPOINTS, NEURAL_MAX_KEYPOINTS, supports_guided_matching
         def feature_limits():
-            neural = self.feature_method.currentText() != "SIFT"
-            self.key_limit.setMaximum(4096 if neural else 1_000_000)
-            self.key_limit.setValue(2048 if neural else 24000)
+            sift = self.feature_method.currentText() == "SIFT"
+            self.key_limit.setSpecialValueText("Engine default" if sift else "")
+            self.key_limit.setRange(0 if sift else 1, 1_000_000 if sift else NEURAL_MAX_KEYPOINTS)
+            self.key_limit.setValue(24000 if sift else NEURAL_DEFAULT_KEYPOINTS)
+            self.key_limit.setToolTip(
+                "Maximum features per image. Engine default uses the native limit." if sift else
+                f"Maximum features per image. LightGlue requires 1 to {NEURAL_MAX_KEYPOINTS} features.")
             update_matching_controls()
         def update_matching_controls():
             fast = self.mode.currentText() == "Fast"
-            self.c2f.setEnabled(fast and self.feature_method.currentText() == "SIFT")
+            method = self.feature_method.currentText()
+            self.c2f.setEnabled(fast and method == "SIFT")
             self.generic.setEnabled(fast)
+            guided = supports_guided_matching(method)
+            self.guided.setEnabled(guided)
+            if not guided:
+                self.guided.setChecked(False)
+            self.guided.setToolTip(
+                "Search for additional correspondences using the geometry of each matched pair." if guided else
+                "Available with SIFT. LightGlue verifies matches without the extra guided pass.")
         self.feature_method.currentTextChanged.connect(feature_limits)
         self.mode.currentTextChanged.connect(update_matching_controls)
-        update_matching_controls()
+        feature_limits()
         from .workflow_ui import alignment_context
         alignment_context(self, parent)
         palette = self.summary.palette()
@@ -305,7 +317,7 @@ class AlignPhotosDialog(_SettingsDialog):
     def settings(self):
         QSettings().setValue('align/camera_model', self.camera_model.currentData())
         return {"accuracy": self.accuracy.currentData() or self.accuracy.currentText(),
-                "generic": self.generic.isChecked(),
+                "generic": self.generic.isEnabled() and self.generic.isChecked(),
                 "mode": self.mode.currentText(),
                 "mapper": self.mapper.currentText(),
                 "feature_method": self.feature_method.currentText(),
@@ -313,7 +325,7 @@ class AlignPhotosDialog(_SettingsDialog):
                 "coarse_to_fine": self.c2f.isEnabled() and self.c2f.isChecked(),
                 "reference": self.reference.isEnabled() and self.reference.isChecked(),
                 "key_point_limit": self.key_limit.value(),
-                "guided_matching": self.guided.isChecked(),
+                "guided_matching": self.guided.isEnabled() and self.guided.isChecked(),
                 "single_camera": self.single_camera.isChecked(),
                 "camera_model": self.camera_model.currentData(),
                 "calibration_groups": getattr(self, "calibration_groups", {}),

@@ -447,7 +447,8 @@ def camera_groups_step(db, label="Grouping cameras", groups=None):
 
 # COLMAP camera model id -> indices of (x-scaled, y-scaled) params
 _CAM_SCALE = {0: ([0, 1], [2]), 1: ([0, 2], [1, 3]), 2: ([0, 1], [2]), 3: ([0, 1], [2]),
-              4: ([0, 2], [1, 3]), 6: ([0, 2], [1, 3]), 8: ([0, 1], [2]), 9: ([0, 1], [2])}
+              4: ([0, 2], [1, 3]), 5: ([0, 2], [1, 3]), 6: ([0, 2], [1, 3]),
+              8: ([0, 1], [2]), 9: ([0, 1], [2])}
 
 
 def _scale_cameras(con, factors):
@@ -853,22 +854,25 @@ def _check_model(out, n_images, fallback, min_frac=0.5):
 
 
 # ------------------------------------------------------------ step builders
+def uses_coarse_alignment(settings, target_size):
+    return (settings.get("mode", "Fast") == "Fast"
+            and settings.get("feature_method", "SIFT") == "SIFT"
+            and settings.get("coarse_to_fine", True)
+            and target_size > COARSE_MAX_SIZE * 1.25)
+
+
 def fast_align_steps(exe, wd, names, infos, s):
     """Build the Fast pipeline. Steps are (label, args|callable, weight).
 
     A callable step runs in-process and may return a list of steps that is
     inserted right after it (used for decisions that depend on results).
     """
-    from .colmap import opt, ACCURACY_DOWNSCALE
-    from .colmap import image_dir, image_list
+    from .colmap import opt, image_dir, image_list, image_long_edge, alignment_extraction_sizes
     img_dir = image_dir(wd)
     ilist = image_list(wd)
-    maxdim = max([i.get("width", 0) for i in infos] + [i.get("height", 0) for i in infos] + [0]) or 3200
-    fine_size = max(256, maxdim // ACCURACY_DOWNSCALE[s["accuracy"]])
-    from .engine import extraction_size
-    requested_size = fine_size
-    fine_size = extraction_size(fine_size, s)
-    do_fine = s.get("feature_method", "SIFT") == "SIFT" and s.get("coarse_to_fine", True) and fine_size > COARSE_MAX_SIZE * 1.25
+    maxdim = max(map(image_long_edge, infos), default=0)
+    requested_size, fine_size = alignment_extraction_sizes(maxdim, s)
+    do_fine = uses_coarse_alignment(s, fine_size)
     coarse_size = min(COARSE_MAX_SIZE, fine_size)
     cdb, fdb = os.path.join(wd, "coarse.db"), os.path.join(wd, "database.db")
     csparse, sparse = os.path.join(wd, "sparse_coarse"), os.path.join(wd, "sparse")
@@ -878,7 +882,7 @@ def fast_align_steps(exe, wd, names, infos, s):
             os.remove(p)
     os.makedirs(csparse, exist_ok=True); os.makedirs(sparse, exist_ok=True)
 
-    use_cache = s.get("decode_cache", True) and all(i.get("width") and i.get("height") for i in infos)
+    use_cache = s.get("decode_cache", True) and all(map(image_long_edge, infos))
     work_f, work_c = os.path.join(wd, "_work_fine"), os.path.join(wd, "_work_coarse")
     dims = {}
     fine_kp = s["key_point_limit"]
@@ -927,8 +931,6 @@ def fast_align_steps(exe, wd, names, infos, s):
         a = ["matches_importer", "--database_path", db, "--match_list_path", ptxt, "--match_type", "pairs"]
         from .engine import matching_arguments
         a += matching_arguments(exe, "matches_importer", s)
-        if s.get("guided_matching"):
-            a += opt(exe, "matches_importer", ["FeatureMatching.guided_matching", "SiftMatching.guided_matching"], "1")
         from .pair_matching import PairImport
         return PairImport(a, db, ptxt, ilist)
 

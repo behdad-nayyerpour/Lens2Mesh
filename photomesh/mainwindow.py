@@ -1850,23 +1850,28 @@ class MainWindow(SurveyMixin, RegistrationMixin, ReferenceMixin, MarkerEditMixin
             QMessageBox.warning(self, "Align Photos", str(error))
             return
         enabled = [c for c in ch.cameras if c.enabled]
-        if s["mode"] == "Fast" and any(not (c.desc and os.path.exists(c.desc)) for c in enabled):
+        if not saved and s["mode"] == "Fast" and s.get("generic", True):
             from .fastpipe import analyze_images
-            self.cancel_thumbnails()
-            paths = [c.path for c in enabled]
-            cache = os.path.join(wd, "cache")
-            infos, cancelled, err = run_modal(
-                self, "Align Photos", "Preparing photos (thumbnails / global descriptors)...",
-                lambda report, cancelled: analyze_images(paths, cache, progress=lambda i, n, *_: report(i, n),
-                                                         cancel=cancelled), len(paths))
-            if cancelled or err:
-                if err:
-                    self.show_error("Align Photos", f"Could not read the photos:\n{err}",
-                                    step="Align Photos: prepare photos", params=s)
-                return
-            for c in enabled:
-                i = infos.get(c.path, {})
-                c.desc, c.width, c.height = i.get("desc", ""), i.get("width", 0), i.get("height", 0)
+            missing = [c for c in enabled if not (c.desc and os.path.isfile(c.desc))]
+            if missing:
+                self.cancel_thumbnails()
+                paths = [c.path for c in missing]
+                cache = os.path.join(wd, "cache")
+                infos, cancelled, err = run_modal(
+                    self, "Align Photos", "Preparing photos for visual pair selection...",
+                    lambda report, cancelled: analyze_images(paths, cache, progress=lambda i, n, *_: report(i, n),
+                                                             cancel=cancelled),
+                    len(paths))
+                if cancelled or err:
+                    if err:
+                        self.show_error("Align Photos", f"Could not read the photos:\n{err}",
+                                        step="Align Photos: prepare photos", params=s)
+                    return
+                for camera in missing:
+                    info = infos.get(camera.path, {})
+                    if info.get("desc"):
+                        camera.desc = info["desc"]
+                        camera.width, camera.height = info["width"], info["height"]
         names = [mapping[c.path] for c in enabled]
         if not saved:
             s["calibration_groups"] = {mapping[path]: group for path,group in s.get("calibration_groups",{}).items()
